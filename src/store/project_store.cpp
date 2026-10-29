@@ -1,4 +1,5 @@
 #include "project_store.h"
+#include "interpretation_store.h"
 #include <QDir>
 #include <QFileInfo>
 #include <QSqlError>
@@ -111,7 +112,7 @@ bool ProjectStore::open(const QString& directory,bool create,const QString& proj
             while(r.next())if(r.value(1).toString()=="sheet")hasSheet=true;r.finish();
             if((!hasSheet&&!exec("ALTER TABLE log_sets ADD COLUMN sheet TEXT DEFAULT ''",{},error))||!commit(error)){rollback();return false;}
         }
-        if(!ensureImportPerformanceSchema(*this,error))return false;if(!ensureFileGraphSchema(*this,error))return false;return ensureCoordinateSystemSchema(*this,error);
+        if(!ensureImportPerformanceSchema(*this,error)||!ensureFileGraphSchema(*this,error)||!ensureCoordinateSystemSchema(*this,error)||!interpretation::ensureSchema(*this,error)){close();return false;}return true;
     }
     const QString schema=QString::fromUtf8(R"SQL(
 CREATE TABLE ds_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -141,7 +142,7 @@ CREATE TABLE source_cells(table_id INTEGER REFERENCES source_tables(id) ON DELET
 CREATE TABLE changes(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT,entity_id INTEGER,description TEXT,created TEXT DEFAULT CURRENT_TIMESTAMP);
 )SQL");
     if(!begin(error))return false;for(auto statement:schema.split(';',Qt::SkipEmptyParts)){statement=statement.trimmed();if(statement.isEmpty())continue;if(!exec(statement,{},error)){rollback();return false;}}
-    if(!exec("INSERT INTO ds_meta VALUES('schema_version','1'),('project_name',?)",{projectName},error)||!commit(error)){rollback();return false;}name=projectName;dir.mkpath("sources");dir.mkpath("images");dir.mkpath("exports");if(!ensureImportPerformanceSchema(*this,error))return false;if(!ensureFileGraphSchema(*this,error))return false;return ensureCoordinateSystemSchema(*this,error);
+    if(!exec("INSERT INTO ds_meta VALUES('schema_version','1'),('project_name',?)",{projectName},error)||!commit(error)){rollback();return false;}name=projectName;dir.mkpath("sources");dir.mkpath("images");dir.mkpath("exports");if(!ensureImportPerformanceSchema(*this,error)||!ensureFileGraphSchema(*this,error)||!ensureCoordinateSystemSchema(*this,error)||!interpretation::ensureSchema(*this,error)){close();return false;}return true;
 }
 bool ProjectStore::ensureWell(const WellInfo& w,long long& id,std::string& e){
     if(w.wellName.empty()){e="井名为空，不能保存";return false;}QSqlQuery r;

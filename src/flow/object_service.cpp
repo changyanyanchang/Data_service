@@ -65,7 +65,15 @@ bool DataService::readSampleTable(long long id,SampleTable& table,std::string& e
     while(r.next()){if(r.value(0).toLongLong()!=last){last=r.value(0).toLongLong();SampleRecord sample;sample.sampleNumber=s(r.value(1).toString());sample.sampleType=s(r.value(2).toString());sample.sourceRange=s(r.value(3).toString());sample.topDepth=value(r.value(4));sample.bottomDepth=value(r.value(5));table.samples.push_back(std::move(sample));}if(!r.value(6).isNull())table.samples.back().measurements.push_back({s(r.value(7).toString()),s(r.value(8).toString()),value(r.value(9)),s(r.value(10).toString())});}return true;
 }
 bool DataService::readTimeDepth(long long id,TimeDepthTable& t,std::string& e)const{
-    t={};QSqlQuery r;if(!impl_->store.exec("SELECT o.name,o.payload,s.stored_path FROM well_objects o LEFT JOIN sources s ON s.id=o.source_id WHERE o.id=? AND o.kind='time_depth'",{id},e,&r))return false;if(!r.next()){e="时深关系不存在";return false;}t.relationName=s(r.value(0).toString());auto o=object(r.value(1).toString());t.depthInfo=readDepth(o["depth"].toObject());t.timeUnit=s(o["timeUnit"].toString());t.timeType=s(o["timeType"].toString());t.timeReference=s(o["timeReference"].toString());t.sourceFile=s(impl_->store.absolutePath(r.value(2).toString()));for(auto item:o["points"].toArray()){auto p=item.toObject();t.depthTimePairs.push_back({jnumber(p["depth"]),jnumber(p["time"])});}return true;
+    t={};QSqlQuery r;if(!impl_->store.exec("SELECT o.name,o.payload,s.stored_path FROM well_objects o LEFT JOIN sources s ON s.id=o.source_id WHERE o.id=? AND o.kind='time_depth'",{id},e,&r))return false;if(!r.next()){e="时深关系不存在";return false;}
+    t.relationName=s(r.value(0).toString());auto o=object(r.value(1).toString());
+    t.depthInfo=readDepth(o["depth"].toObject());t.timeUnit=s(o["timeUnit"].toString());
+    t.timeType=s(o["timeType"].toString());t.timeReference=s(o["timeReference"].toString());
+    t.positionDepthInfo=readDepth(o["positionDepth"].toObject());
+    t.coordinateSystem=s(o["coordinateSystem"].toString());t.coordinateUnit=s(o["coordinateUnit"].toString());
+    t.sourceSheet=s(o["sourceSheet"].toString());t.sourceFile=s(impl_->store.absolutePath(r.value(2).toString()));
+    // Older persisted two-column tables have no XYZ keys; jnumber leaves them Missing.
+    for(auto item:o["points"].toArray()){auto p=item.toObject();t.depthTimePairs.push_back({jnumber(p["depth"]),jnumber(p["time"]),jnumber(p["x"]),jnumber(p["y"]),jnumber(p["z"])});}return true;
 }
 bool DataService::readTrajectory(long long id,TrajectorySurvey& t,std::string& e)const{
     t={};QSqlQuery r;if(!impl_->store.exec("SELECT name,payload FROM well_objects WHERE id=? AND kind='trajectories'",{id},e,&r))return false;if(!r.next()){e="测斜资料不存在";return false;}t.surveyName=s(r.value(0).toString());auto o=object(r.value(1).toString());t.azimuthReference=s(o["azimuthReference"].toString());for(auto item:o["points"].toArray()){auto p=item.toObject();t.surveyPoints.push_back({jnumber(p["md"]),jnumber(p["inclination"]),jnumber(p["azimuth"])});}return true;

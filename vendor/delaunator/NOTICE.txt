@@ -1,0 +1,15 @@
+delaunator-cpp, Copyright (c) 2018 Volodymyr Bilonenko.
+Repository: https://github.com/delfrrr/delaunator-cpp
+Upstream commit: c1521f6e879881232dcddabd6c2ddb6187e8714b
+Retrieved 2026-10-29 from the upstream repository at this exact commit.
+
+Only include/delaunator.hpp is used, without local modifications.
+Header SHA-256: c32873a9416d925f348bc559d87ea028238b9dba7db3bac052cb1460ac9fa25d
+License: MIT, reproduced in LICENSE. Upstream THIRD-PARTY-NOTICES is retained
+for provenance; the benchmark, examples, fixtures and their dependencies are
+not included or linked. The library is a C++ port of mapbox/delaunator.
+
+Paleo's caller supplies unique finite XY points, normalizes coordinates, rejects
+conflicting depths at duplicated XY positions, and bounds accepted triangle
+edges. The triangulation is opt-in; no extrapolation outside accepted triangles
+is performed. A maximum edge does not recover source fault or polygon topology.

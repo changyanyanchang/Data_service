@@ -3,6 +3,23 @@
 #include <QJsonDocument>
 
 namespace paleo::data::detail {
+namespace {
+QJsonObject timeDepthJson(const TimeDepthTable& td){
+    QJsonArray points;
+    for(const auto& p:td.depthTimePairs)points.append(QJsonObject{
+        {"depth",QJsonValue::fromVariant(number(p.depthValue))},
+        {"time",QJsonValue::fromVariant(number(p.timeValue))},
+        {"x",QJsonValue::fromVariant(number(p.x))},
+        {"y",QJsonValue::fromVariant(number(p.y))},
+        {"z",QJsonValue::fromVariant(number(p.z))}});
+    return {{"depth",depthJson(td.depthInfo)},{"timeUnit",q(td.timeUnit)},
+        {"timeType",q(td.timeType)},{"timeReference",q(td.timeReference)},
+        {"positionDepth",depthJson(td.positionDepthInfo)},
+        {"coordinateSystem",q(td.coordinateSystem)},{"coordinateUnit",q(td.coordinateUnit)},
+        {"sourceSheet",q(td.sourceSheet)},{"points",points}};
+}
+}
+
 bool ProjectStore::saveParsed(long long sourceId,const ParsedFile& file,const ParseOptions& options,std::string& e,const CancelCheck& cancelled,bool inputNullsResolved){
     auto insert=[&](const QString& sql,const QVariantList& args,long long& id){QSqlQuery r;if(!exec(sql,args,e,&r))return false;id=r.lastInsertId().toLongLong();return true;};
     auto insertRows=[&](QSqlQuery& query,const QVector<QVariantList>& columns){
@@ -71,14 +88,14 @@ bool ProjectStore::saveParsed(long long sourceId,const ParsedFile& file,const Pa
             }
         }
         for(const auto& trajectory:well.wellbore.trajectories){QJsonArray points;for(auto& p:trajectory.surveyPoints)points.append(QJsonObject{{"md",QJsonValue::fromVariant(number(p.measuredDepth))},{"inclination",QJsonValue::fromVariant(number(p.inclinationDegrees))},{"azimuth",QJsonValue::fromVariant(number(p.azimuthDegrees))}});if(!exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(?,?,?,?,?)",{wid,sourceId,"trajectories",q(trajectory.surveyName),json(QJsonObject{{"azimuthReference",q(trajectory.azimuthReference)},{"points",points}})},e))return false;}
-        for(const auto& td:well.timeDepthRelations){QJsonArray points;for(auto& p:td.depthTimePairs)points.append(QJsonObject{{"depth",QJsonValue::fromVariant(number(p.depthValue))},{"time",QJsonValue::fromVariant(number(p.timeValue))}});if(!exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(?,?,?,?,?)",{wid,sourceId,"time_depth",q(td.relationName),json(QJsonObject{{"depth",depthJson(td.depthInfo)},{"timeUnit",q(td.timeUnit)},{"timeType",q(td.timeType)},{"timeReference",q(td.timeReference)},{"points",points}})},e))return false;}
+        for(const auto& td:well.timeDepthRelations){if(!exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(?,?,?,?,?)",{wid,sourceId,"time_depth",q(td.relationName),json(timeDepthJson(td))},e))return false;}
         for(const auto& mt:well.wellbore.markerTracks){QJsonArray points;for(auto& p:mt.markers)points.append(QJsonObject{{"id",p.markerId},{"name",q(p.markerName)},{"depth",QJsonValue::fromVariant(number(p.depthValue))},{"tvd",QJsonValue::fromVariant(number(p.tvd))},{"tvdss",QJsonValue::fromVariant(number(p.tvdss))},{"row",p.sourceRow}});if(!exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(?,?,?,?,?)",{wid,sourceId,"markers",q(mt.trackName),json(QJsonObject{{"depth",depthJson(mt.depthInfo)},{"points",points}})},e))return false;}
         for(const auto& ct:well.wellbore.corePhotoTracks){QJsonArray images;for(auto& p:ct.photos)images.append(QJsonObject{{"path",q(p.imagePath)},{"top",QJsonValue::fromVariant(number(p.topDepth))},{"bottom",QJsonValue::fromVariant(number(p.bottomDepth))},{"description",q(p.description)}});if(!exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(?,?,?,?,?)",{wid,sourceId,"core_photos",q(ct.trackName),json(images)},e))return false;}
         for(const auto& a:well.attachments)if(!exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(?,?,?,?,?)",{wid,sourceId,"attachments",q(a.attachmentName),json(QJsonObject{{"path",q(a.filePath)},{"type",q(a.attachmentType)},{"targetType",q(a.targetType)},{"targetId",a.targetId}})},e))return false;
     }
     for(const auto& v:file.volumes){QJsonObject g{{"traceCount",double(v.geometry.traceCount)},{"inlineMin",v.geometry.inlineMin},{"inlineMax",v.geometry.inlineMax},{"crosslineMin",v.geometry.crosslineMin},{"crosslineMax",v.geometry.crosslineMax},{"crs",q(v.geometry.coordinateSystem)},{"unit",q(v.geometry.coordinateUnit)}};QJsonObject sampling{{"sampleCount",v.sampling.sampleCount},{"firstTime",QJsonValue::fromVariant(number(v.sampling.firstTime))},{"sampleInterval",QJsonValue::fromVariant(number(v.sampling.sampleInterval))},{"timeUnit",q(v.sampling.timeUnit)},{"timeType",q(v.sampling.timeType)},{"timeReference",q(v.sampling.timeReference)}};
         if(!exec("INSERT INTO volumes(source_id,name,path,format,amplitude_unit,geometry,sampling) VALUES(?,?,?,?,?,?,?)",{sourceId,q(v.volumeName),q(v.dataFile),q(v.fileFormat),q(v.amplitudeUnit),json(g),json(sampling)},e))return false;}
-    for(const auto& td:file.unassignedTimeDepth){QJsonArray points;for(auto& p:td.depthTimePairs)points.append(QJsonObject{{"depth",QJsonValue::fromVariant(number(p.depthValue))},{"time",QJsonValue::fromVariant(number(p.timeValue))}});if(!exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(NULL,?,?,?,?)",{sourceId,"time_depth",q(td.relationName),json(QJsonObject{{"depth",depthJson(td.depthInfo)},{"timeUnit",q(td.timeUnit)},{"timeType",q(td.timeType)},{"timeReference",q(td.timeReference)},{"points",points}})},e))return false;}
+    for(const auto& td:file.unassignedTimeDepth){if(!exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(NULL,?,?,?,?)",{sourceId,"time_depth",q(td.relationName),json(timeDepthJson(td))},e))return false;}
     for(const auto& h:file.horizons){long long hid;if(!insert("INSERT INTO horizons(source_id,name,volume_id,crs,unit,time_unit,time_type,time_reference) VALUES(?,?,?,?,?,?,?,?)",{sourceId,q(h.horizonName),h.parentVolumeId?QVariant(h.parentVolumeId):QVariant(),q(h.coordinateSystem),q(h.coordinateUnit),q(h.timeUnit),q(h.timeType),q(h.timeReference)},hid))return false;
         QSqlQuery query(db);if(!query.prepare("INSERT INTO horizon_points(horizon_id,seq,inline_no,crossline_no,x,y,z) VALUES(?,?,?,?,?,?,?)")){e=s(query.lastError().text());return false;}
         QVector<QVariantList> columns(7);int seq=0;

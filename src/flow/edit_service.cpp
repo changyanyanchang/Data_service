@@ -8,6 +8,31 @@ namespace paleo::data {
 using namespace detail;
 static bool rowExists(ProjectStore& st,const QString& table,long long id,std::string& e){QSqlQuery r;if(!st.exec("SELECT 1 FROM "+table+" WHERE id=?",{id},e,&r))return false;if(!r.next()){e="记录不存在";return false;}return true;}
 static bool recordChange(ProjectStore& st,const QString& kind,long long id,const QString& description,std::string& e){return st.exec("INSERT INTO changes(kind,entity_id,description) VALUES(?,?,?)",{kind,id,description},e);}
+bool DataService::saveLogSetDepthInfo(long long id,const DepthInfo& value,std::string& e){
+    e.clear();if(id<=0){e="曲线组编号无效";return false;}
+    const auto supplied=depthJson(value);QJsonObject confirmed;
+    for(auto it=supplied.begin();it!=supplied.end();++it){
+        const auto text=it.value().toString();if(text.isEmpty())continue;
+        const auto trimmed=text.trimmed();if(trimmed.isEmpty()){e="深度约定不能只有空白";return false;}
+        confirmed.insert(it.key(),trimmed);
+    }
+    if(confirmed.isEmpty()){e="请提供至少一项已核对的深度约定";return false;}
+    const auto type=confirmed.value("type").toString(),direction=confirmed.value("direction").toString();
+    if(!type.isEmpty()&&type!="MD"&&type!="TVD"&&type!="TVDSS"){e="深度类型须为 MD、TVD 或 TVDSS";return false;}
+    if(!direction.isEmpty()&&direction!="down"&&direction!="up"){e="TVDSS 正方向须为 down 或 up";return false;}
+    auto& st=impl_->store;Transaction tx(st,e);if(!tx.active)return false;QSqlQuery row;
+    if(!st.exec("SELECT depth_json FROM log_sets WHERE id=?",{id},e,&row))return false;
+    if(!row.next()){e="曲线组不存在";return false;}const auto previous=object(row.value(0).toString());row.finish();auto updated=previous;
+    for(auto it=confirmed.begin();it!=confirmed.end();++it){
+        const auto old=previous.value(it.key()).toString();
+        if(!old.isEmpty()&&old!=it.value().toString()){e="曲线组已有深度约定；单位或基准转换需要明确换算，不能仅改标签";return false;}
+        updated.insert(it.key(),it.value());
+    }
+    if(updated==previous)return tx.commit(e);
+    const auto description="依据已核对资料补充曲线组深度约定（原始轴与样点未改动）："+json(previous)+" → "+json(updated);
+    return st.exec("UPDATE log_sets SET depth_json=? WHERE id=?",{json(updated),id},e)
+        &&recordChange(st,"log_set",id,description,e)&&tx.commit(e);
+}
 bool DataService::createWell(const WellInfo& w,long long& id,std::string& e){id=0;QSqlQuery r;if(!impl_->store.exec("SELECT id FROM wells WHERE name=?",{q(w.wellName)},e,&r))return false;if(r.next()){e="同名井已存在";return false;}return impl_->store.ensureWell(w,id,e);}
 bool DataService::saveWellInfo(long long id,const WellInfo& w,std::string& e){
     auto& st=impl_->store;if(!rowExists(st,"wells",id,e))return false;if(w.wellName.empty()){e="井名不能为空";return false;}

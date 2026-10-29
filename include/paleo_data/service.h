@@ -2,6 +2,7 @@
 #include "parser.h"
 #include "seismic.h"
 #include "graph.h"
+#include "interpretation.h"
 #include <memory>
 #include <cstdint>
 
@@ -305,6 +306,9 @@ public:
                         bool processed, CurveSlice& result, std::string& error) const;
     // 曲线组编号来自 DataEntry.parentId。完整返回共同深度/TVD/TVDSS轴、曲线及来源工作表。
     bool readLogSet(long long logSetId, bool processed, LogSet& result, std::string& error) const;
+    // 根据已核对资料补充深度约定；空字段保留原值，已有非空约定不可仅改标签。
+    // 不换算或修改任何轴/曲线样点；旧解释输入快照保持不变。
+    bool saveLogSetDepthInfo(long long logSetId, const DepthInfo& value, std::string& error);
     bool cleanCurve(long long curveId, const CurveCleaningRule& rule, std::string& error);
     bool saveCurveUnit(long long curveId, const std::string& confirmedUnit, std::string& error); // confirm unknown unit; never relabel existing measurements
     bool updateCurveValue(long long curveId, long long sampleIndex, double value, std::string& error);
@@ -349,6 +353,10 @@ public:
     bool readVolume(long long id, SeismicVolume& result, std::string& error) const; // metadata only; traces stays empty
     bool saveVolume(long long id, const SeismicVolume& value, std::string& error); // edits existing registration; never stores amplitudes
     bool readHorizon(long long id, long long offset, int limit, SeismicHorizon& result, std::string& error) const;
+    // Bounding box uses this horizon's original X/Y coordinate units. Unknown CRS remains unknown.
+    // Returns actual source points; exceeding maxPoints is an error, never silent downsampling.
+    bool readHorizonRegion(long long id, double xMin, double yMin, double xMax, double yMax,
+                           int maxPoints, SeismicHorizon& result, std::string& error) const;
     bool saveHorizonInfo(long long id, const SeismicHorizon& value, std::string& error); // name/parent/conventions only
     bool readMap(long long id, GeologicalMap& result, std::string& error) const;
     bool saveMap(long long& id, const GeologicalMap& value, std::string& error);
@@ -401,6 +409,38 @@ public:
     bool extractSection(const SeismicSection& section, const SectionReadOptions& options, SeismicSectionResult& result, std::string& error, const CancelCheck& cancelled={});
     bool readTimeSlice(long long volumeId, double time, const TimeSliceReadOptions& options, SeismicTimeSliceResult& result, std::string& error, const CancelCheck& cancelled={}, const TimeSliceTileCallback& tileReady={});
     bool backupDatabase(const std::string& destination, std::string& error) const;
+    // Missing project policy reads as an empty/default value. Saving changes
+    // business rules and their audit record, never raw metadata or sample arrays.
+    bool readCorrelationProjectConventions(CorrelationProjectConventions& result, std::string& error) const;
+    bool saveCorrelationProjectConventions(const CorrelationProjectConventions& value, std::string& error);
+    // Missing preferences read as an empty set; stale resource IDs remain readable
+    // so callers can fall back per well. Save replaces the full set,
+    // validates resource ownership and records an atomic before/after audit.
+    bool readCorrelationTimeDepthPreferences(std::vector<CorrelationTimeDepthPreference>& result, std::string& error) const;
+    bool saveCorrelationTimeDepthPreferences(const std::vector<CorrelationTimeDepthPreference>& values, std::string& error);
+    // Correlation inputs and results are obtained through this SDK, never by parsing source files.
+    // Capture freezes a consistent database snapshot. Unknown conventions remain unknown.
+    bool captureCorrelationInputs(const CorrelationInputRequest& request, CorrelationInputSnapshot& result,
+                                  std::string& error, const CancelCheck& cancelled={});
+    bool readCorrelationSnapshot(const std::string& id, CorrelationInputSnapshot& result, std::string& error) const;
+    // One transaction publishes a complete immutable revision. An empty expected head creates a
+    // new interpretation only. Reusing a key with different content is an error.
+    bool commitInterpretation(const InterpretationDocument& document, const InterpretationCommitOptions& options,
+                              InterpretationCommitResult& result, std::string& error);
+    bool listInterpretations(std::vector<InterpretationSummary>& result, std::string& error) const;
+    bool listInterpretationRevisions(const std::string& interpretationId,
+                                    std::vector<InterpretationRevisionSummary>& result, std::string& error) const;
+    // Empty revision reads the current head; explicit IDs always read the original saved values.
+    bool readInterpretationRevision(const std::string& interpretationId, const std::string& revision,
+                                    InterpretationDocument& result, std::string& error) const;
+    bool saveReferenceTemplate(const InterpretationTemplate& value, std::string& error);
+    bool listReferenceTemplates(std::vector<InterpretationTemplate>& result, std::string& error) const;
+    bool readReferenceTemplate(const std::string& id, const std::string& version,
+                               InterpretationTemplate& result, std::string& error) const;
+    bool saveClustering(const InterpretationClustering& value, std::string& error);
+    bool listClusterings(std::vector<InterpretationClustering>& result, std::string& error) const;
+    bool readClustering(const std::string& id, const std::string& version,
+                        InterpretationClustering& result, std::string& error) const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
