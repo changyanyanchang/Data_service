@@ -1,6 +1,8 @@
 #include "project_store.h"
+#include <QRegularExpression>
 #include <map>
 #include <set>
+#include <vector>
 
 namespace paleo::data::detail {
 namespace {
@@ -11,6 +13,59 @@ QString canonicalCrs(const QString& value){
 bool isEpsg(const QString& value){
     if(!value.startsWith("EPSG:"))return false;
     bool digits=false;const auto number=value.mid(5).toLongLong(&digits);return digits&&number>0;
+}
+// A WGS84 UTM zone written as a name is an explicit CRS. Normalize it to EPSG
+// so it is not replaced by the undeclared-EPSG default.
+QString declaredEpsg(const QString& value){
+    const auto code=canonicalCrs(value);
+    if(isEpsg(code))return code;
+    const auto upper=value.toUpper();
+    QRegularExpression named(QStringLiteral("UTM84-(\\d{1,2})([NS])\\b"));
+    auto match=named.match(upper);
+    QString hemisphere;
+    if(match.hasMatch())hemisphere=match.captured(2);
+    else{
+        QRegularExpression spelled(QStringLiteral("WGS\\s*1984\\s*UTM,\\s*ZONE\\s*(\\d{1,2})\\s*(NORTH|SOUTH)\\b"));
+        match=spelled.match(upper);
+        if(!match.hasMatch())return {};
+        hemisphere=match.captured(2);
+    }
+    bool ok=false;const int zone=match.captured(1).toInt(&ok);
+    if(!ok||zone<1||zone>60)return {};
+    return QStringLiteral("EPSG:%1").arg((hemisphere.startsWith(QLatin1Char('S'))?32700:32600)+zone);
+}
+QString defaultProjectCrs(){return QStringLiteral("EPSG:32650");}
+bool normalizeStoredCoordinates(ProjectStore& store,std::string& error){
+    QSqlQuery rows;
+    if(!store.exec("SELECT source_id,object_kind,object_id,crs,unit FROM source_coordinate_systems",{},error,&rows))return false;
+    struct Candidate{long long source=0,object=0;QString kind,crs,unit;};
+    std::vector<Candidate> candidates;
+    while(rows.next()){
+        const auto crs=rows.value(3).toString();const auto resolved=declaredEpsg(crs);
+        if(!isEpsg(resolved)||canonicalCrs(crs)==resolved)continue;
+        auto unit=rows.value(4).toString().trimmed();if(unit.isEmpty())unit=QStringLiteral("m");
+        candidates.push_back({rows.value(0).toLongLong(),rows.value(2).toLongLong(),rows.value(1).toString(),resolved,unit});
+    }
+    rows.finish();
+    for(const auto& row:candidates)
+        if(!store.exec("UPDATE source_coordinate_systems SET crs=?,unit=? WHERE source_id=? AND object_kind=? AND object_id=?",{row.crs,row.unit,row.source,row.kind,row.object},error))return false;
+    if(!store.exec("SELECT id,crs,unit,x,y FROM wells",{},error,&rows))return false;
+    struct WellRow{long long id=0;QString crs,unit;};
+    std::vector<WellRow> wells;
+    while(rows.next()){
+        const auto crs=rows.value(1).toString();const auto resolved=declaredEpsg(crs);
+        const bool positioned=!rows.value(3).isNull()&&!rows.value(4).isNull();
+        QString next;
+        if(isEpsg(resolved)&&canonicalCrs(crs)!=resolved)next=resolved;
+        else if(crs.trimmed().isEmpty()&&positioned)next=defaultProjectCrs();
+        if(next.isEmpty())continue;
+        auto unit=rows.value(2).toString().trimmed();if(unit.isEmpty())unit=QStringLiteral("m");
+        wells.push_back({rows.value(0).toLongLong(),next,unit});
+    }
+    rows.finish();
+    for(const auto& well:wells)
+        if(!store.exec("UPDATE wells SET crs=?,unit=? WHERE id=?",{well.crs,well.unit,well.id},error))return false;
+    return true;
 }
 struct CandidateRows {
     std::vector<ProjectCrsCandidate> items;
@@ -60,6 +115,7 @@ bool ProjectStore::saveParsedCoordinateSystems(long long sourceId,const ParsedFi
     return true;
 }
 bool ProjectStore::updateProjectCoordinateSystem(std::string& error){
+    if(!normalizeStoredCoordinates(*this,error))return false;
     QSqlQuery meta;QString current,basis;
     if(!exec("SELECT key,value FROM ds_meta WHERE key IN ('project_crs','project_crs_basis')",{},error,&meta))return false;
     while(meta.next()){
@@ -67,16 +123,22 @@ bool ProjectStore::updateProjectCoordinateSystem(std::string& error){
         else basis=meta.value(1).toString();
     }
     meta.finish();
-    if(basis=="manual"||(!current.isEmpty()&&basis.isEmpty())||(!basis.isEmpty()&&basis!="import"))return true;
+    if(basis=="manual"||(!current.isEmpty()&&basis.isEmpty()))return true;
+    if(!basis.isEmpty()&&basis!="import"&&basis!="default")return true;
     CandidateRows candidates;if(!readCandidates(*this,candidates,error))return false;
     if(!candidates.hasConflict()&&candidates.groups.size()==1){
-        const auto code=candidates.groups.begin()->first;
+        const auto code=declaredEpsg(candidates.groups.begin()->first);
         if(isEpsg(code)){
             const auto& units=candidates.groups.begin()->second;
             const auto unit=units.empty()?QStringLiteral(""):*units.begin();
             return exec("INSERT OR REPLACE INTO ds_meta(key,value) VALUES('project_crs',?),('project_crs_unit',?),('project_crs_basis','import')",{code,unit},error);
         }
     }
+    // No explicit EPSG. Keep a named non-EPSG declaration as a candidate, and
+    // use EPSG:32650 (WGS 84 / UTM zone 50N) as the project CRS. A conflict
+    // among declared systems is not papered over with that default.
+    if(!candidates.hasConflict())
+        return exec("INSERT OR REPLACE INTO ds_meta(key,value) VALUES('project_crs',?),('project_crs_unit',?),('project_crs_basis','default')",{defaultProjectCrs(),QStringLiteral("m")},error);
     return exec("DELETE FROM ds_meta WHERE key IN ('project_crs','project_crs_unit','project_crs_basis')",{},error);
 }
 }

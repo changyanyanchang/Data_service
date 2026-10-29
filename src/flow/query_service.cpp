@@ -9,7 +9,11 @@ using namespace detail;
 DataService::DataService():impl_(std::make_unique<Impl>()){}
 DataService::~DataService()=default;
 bool DataService::createProject(const std::string& path,const std::string& name,std::string& error){if(name.empty()){error="工区名称不能为空";return false;}return impl_->store.open(q(path),true,q(name),error);}
-bool DataService::openProject(const std::string& path,std::string& error){return impl_->store.open(q(path),false,{},error);}
+bool DataService::openProject(const std::string& path,std::string& error){
+    if(!impl_->store.open(q(path),false,{},error))return false;
+    if(!impl_->store.updateProjectCoordinateSystem(error)){impl_->store.close();return false;}
+    return true;
+}
 bool DataService::openProjectReadOnly(const std::string& path,std::string& error){return impl_->store.open(q(path),false,{},error,true);}
 bool DataService::snapshotDatabase(const std::string& destination,std::string& error)const{
     if(!impl_->store.db.isOpen()){error="请先打开工区";return false;}

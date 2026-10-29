@@ -106,10 +106,27 @@ int main(int argc,char** argv){
         ParsedFile local=otherWell;local.wells[0].wellInfo.coordinateSystem="LOCAL-GRID";
         importModel(service,temp,"local-well.txt",local,error);
         check(service.readProjectCrsInfo(info,error),error);
-        check(info.coordinateSystem.empty()&&info.selectionBasis.empty()&&!info.hasConflict&&info.candidates.size()==1,"non-EPSG declaration remains a candidate");
+        check(info.coordinateSystem=="EPSG:32650"&&info.coordinateUnit=="m"&&info.selectionBasis=="default"&&!info.hasConflict&&info.candidates.size()==1,"named non-EPSG stays a candidate and the project CRS defaults to EPSG:32650");
         ParsedFile noCoordinates=otherWell;noCoordinates.wells[0].wellInfo.wellheadX=Missing;noCoordinates.wells[0].wellInfo.wellheadY=Missing;
         importModel(service,temp,"no-coordinates.txt",noCoordinates,error);
-        check(service.readProjectCrsInfo(info,error)&&info.candidates.size()==1,"CRS without well coordinates is not a well-position candidate");
+        check(service.readProjectCrsInfo(info,error)&&info.coordinateSystem=="EPSG:32650"&&info.candidates.size()==1,"CRS without well coordinates is not a well-position candidate");
+        const auto blankProject=temp.filePath("blank-project");
+        check(service.createProject(utf8(blankProject),"CRS blank",error),error);
+        ParsedFile blank;WellDataset blankWell;blankWell.wellInfo.wellName="BLANK-1";blankWell.wellInfo.wellheadX=500000;blankWell.wellInfo.wellheadY=2400000;
+        blank.wells.push_back(blankWell);importModel(service,temp,"blank-well.txt",blank,error);
+        check(service.readProjectCrsInfo(info,error)&&info.coordinateSystem=="EPSG:32650"&&info.coordinateUnit=="m"&&info.selectionBasis=="default"&&info.candidates.empty(),"missing EPSG defaults to EPSG:32650");
+        std::vector<WellSummary> blankListed;WellInfo blankStored;
+        check(service.listWells(blankListed,error)&&blankListed.size()==1&&service.readWellInfo(blankListed[0].id,blankStored,error),error);
+        check(blankStored.coordinateSystem=="EPSG:32650"&&blankStored.coordinateUnit=="m","well without a CRS is stored as EPSG:32650");
+        const auto utmProject=temp.filePath("utm-project");
+        check(service.createProject(utf8(utmProject),"CRS utm",error),error);
+        ParsedFile utm;WellDataset utmWell;utmWell.wellInfo.wellName="UTM-1";utmWell.wellInfo.wellheadX=333868;utmWell.wellInfo.wellheadY=2361747;
+        utmWell.wellInfo.coordinateSystem="UTM84-50N (\"MENTOR:UTM84-50N:WGS 1984 UTM, Zone 50 North, Meter\")";utmWell.wellInfo.coordinateUnit="m";
+        utm.wells.push_back(utmWell);importModel(service,temp,"utm-well.txt",utm,error);
+        check(service.readProjectCrsInfo(info,error)&&info.coordinateSystem=="EPSG:32650"&&info.coordinateUnit=="m"&&info.selectionBasis=="import"&&info.candidates.size()==1,"explicit WGS84 UTM zone is EPSG:32650");
+        std::vector<WellSummary> utmListed;WellInfo utmStored;
+        check(service.listWells(utmListed,error)&&utmListed.size()==1&&service.readWellInfo(utmListed[0].id,utmStored,error),error);
+        check(utmStored.coordinateSystem=="EPSG:32650"&&utmStored.coordinateUnit=="m","UTM84-50N well CRS is stored as EPSG:32650");
         std::cout<<"coordinate system contract passed\n";return 0;
     }catch(const std::exception& failure){std::cerr<<failure.what()<<'\n';return 1;}
 }
