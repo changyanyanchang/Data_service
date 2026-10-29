@@ -75,6 +75,8 @@ int main(int argc,char** argv) {
     conflict.wells.front().defaultDepthInfo.depthUnit="ft";
     conflict.wells.front().wellbore.logSets.front().depthInfo.depthUnit="ft";
     auto newWell=well; newWell.wellInfo.wellName="SYNTH-NEW";
+    newWell.wellInfo.wellheadX=300000; newWell.wellInfo.wellheadY=2360000;
+    newWell.wellInfo.coordinateSystem="EPSG:32649"; newWell.wellInfo.coordinateUnit="m";
     conflict.wells.insert(conflict.wells.begin(),newWell);
     id=123;
     check(!service.importPreparedFile(u(source),u(source),"../source.las",hash,conflict,id,error),"blocking depth conflict rejected");
@@ -85,6 +87,8 @@ int main(int argc,char** argv) {
     check(service.listData("curves",0,curves,error)&&curves.size()==1&&curves.front().id==curveId,"blocking conflict leaves original curves unchanged");
     std::vector<IssueEntry> issues;
     check(service.listIssues(false,issues,error)&&issues.empty(),"blocking conflict rolls back issues with source");
+    ProjectCrsInfo crs;
+    check(service.readProjectCrsInfo(crs,error)&&crs.candidates.empty()&&crs.coordinateSystem.empty()&&crs.selectionBasis.empty(),"blocking conflict rolls back coordinate candidates and automatic project CRS");
     check(service.readCurveSlice(curveId,Missing,Missing,true,slice,error)&&slice.values[0]==-999,"original values survive rejected batch");
 
     // Issues supplied by the host follow the same rollback rule as storage conflicts.
@@ -112,6 +116,7 @@ int main(int argc,char** argv) {
     const auto reopenedReview=std::find_if(sources.begin(),sources.end(),[reviewId](const SourceEntry& entry){return entry.id==reviewId;});
     check(reopenedReview!=sources.end()&&reopenedReview->status=="review","review status survives reopen");
     check(service.listWells(wells,error)&&wells.size()==2,"rolled-back well stays absent after reopen");
+    check(service.readProjectCrsInfo(crs,error)&&crs.candidates.empty()&&crs.coordinateSystem.empty(),"rolled-back coordinate metadata stays absent after reopen");
     check(service.verifySource(id,error),error);
     check(service.readCurveSlice(curveId,Missing,Missing,true,slice,error),error);
     check(!service.importPreparedFile(u(source),u(source),"../source.las",hash,model,id,error),"readonly rejected");
