@@ -27,6 +27,16 @@ struct PlanarExtent {
     bool valid=false;             // 四项坐标均有限时为 true；false 时四项均为 Missing
 };
 
+// 井口点范围：全部有井口坐标的井的最小外接矩形。
+// 这是工区范围的井位一侧，单独提供以便只关心井位的调用方不必拉地震范围。
+// 缺坐标的井只计数，不按 0 或井名补位；同一批井声明不一致时矩形不予给出。
+struct WellHeadRange {
+    PlanarExtent extent; // 井点 MBR；不可得时 valid=false 且四项为 Missing
+    int wellCount=0, wellsWithCoordinates=0, wellsWithoutCoordinates=0;
+    std::string status;  // complete / unavailable / conventions-mismatch
+    std::vector<std::string> warnings;
+};
+
 // 工区平面范围 = 全部井口点矩形 ∪ 全部地震体范围矩形。
 // 只有两块都在、且坐标约定已确认并一致时才合并；否则 merged.valid=false 并说明原因，
 // 绝不把不同坐标系或单位的数值凑进同一个矩形。单一来源存在时按 partial 给出该块矩形。
@@ -353,8 +363,13 @@ public:
     // 不自动投影、不换算单位、不外推缺道。cancelled 在打开与换算阶段协作生效。
     bool readSeismicCoordinateRange(long long volumeId, SeismicCoordinateRange& result,
                                     std::string& error, const CancelCheck& cancelled={}) const;
-    // 工区平面范围：井口点最小外接矩形 ∪ 全部地震体范围矩形。
-    // 井口取 listWellInfos 的实际坐标；缺坐标的井计数上报，不按 0 或井名补位。
+    // 井口点最小外接矩形。井口取 listWellInfos 的实际坐标；缺坐标的井计数上报。
+    // 同一批井出现多种坐标系或单位时判 conventions-mismatch，矩形四项清空。
+    // 返回 true 只表示查询完成；范围是否可用读 extent.valid 与 status。
+    bool readWellHeadRange(WellHeadRange& result, std::string& error,
+                           const CancelCheck& cancelled={}) const;
+    // 工区平面范围：井口点矩形 ∪ 全部地震体范围矩形。两块都由本服务计算，
+    // 调用方只需消费结果，不要自己再拼一遍。
     // 地震体逐个取 readSeismicCoordinateRange，给出范围的体参与并集；其余记入
     // volumesWithoutRange 与 warnings，不因单个体不可读而让整次调用失败。
     // 合并前要求两侧坐标系与单位已声明且一致；未声明或冲突时 merged 留空，

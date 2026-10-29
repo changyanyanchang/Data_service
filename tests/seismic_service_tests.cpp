@@ -40,6 +40,11 @@ int main(int argc,char**argv){QCoreApplication app(argc,argv);QCoreApplication::
     check(!service.readSeismicCoordinateRange(id,range,error,[]{return true;}),"coordinate range cancellation");
     WellInfo north;north.wellName="A-1";north.wellheadX=499900;north.wellheadY=4000050;north.coordinateSystem="TEST_PROJECTED";north.coordinateUnit="m";long long northId=0;check(service.createWell(north,northId,error),error);
     WellInfo south=north;south.wellName="A-2";south.wellheadX=500300;south.wellheadY=3999900;long long southId=0;check(service.createWell(south,southId,error),error);
+    WellHeadRange heads;check(service.readWellHeadRange(heads,error),error);
+    check(heads.status=="complete"&&heads.extent.valid,"well head range standalone");
+    check(heads.extent.minX==499900&&heads.extent.maxX==500300&&heads.extent.minY==3999900&&heads.extent.maxY==4000050,"well head MBR values");
+    check(heads.wellCount==2&&heads.wellsWithCoordinates==2&&heads.wellsWithoutCoordinates==0&&heads.extent.pointCount==2,"well head counts");
+    check(!service.readWellHeadRange(heads,error,[]{return true;}),"well head range cancellation");
     ProjectPlanarRange area;check(service.readProjectPlanarRange(area,error),error);
     check(area.status=="complete"&&area.merged.valid,"project area merged from wells and seismic");
     check(area.wells.minX==499900&&area.wells.maxX==500300&&area.wells.minY==3999900&&area.wells.maxY==4000050,"well head MBR");
@@ -55,6 +60,8 @@ int main(int argc,char**argv){QCoreApplication app(argc,argv);QCoreApplication::
     WellInfo feet=north;feet.wellName="A-3";feet.coordinateUnit="ft";long long feetId=0;check(service.createWell(feet,feetId,error),error);
     ProjectPlanarRange mixed;check(service.readProjectPlanarRange(mixed,error),error);
     check(mixed.status=="conventions-mismatch"&&!mixed.merged.valid&&!mixed.wells.valid&&std::isnan(mixed.wells.minX),"mixed well units never merged");
+    WellHeadRange mixedHeads;check(service.readWellHeadRange(mixedHeads,error),error);
+    check(mixedHeads.status=="conventions-mismatch"&&!mixedHeads.extent.valid&&std::isnan(mixedHeads.extent.minX),"mixed well units rejected by well head range");
     timeOptions.maxValues=5;check(!service.readTimeSlice(id,104,timeOptions,slice,error)&&slice.amplitudes.empty(),"time budget enforced");
     timeOptions.maxValues=12;check(!service.readTimeSlice(id,104,timeOptions,slice,error,[]{return true;})&&slice.amplitudes.empty(),"cancel gives no partial values");
     check(!service.readTimeSlice(id,99,timeOptions,slice,error),"outside time rejected");
@@ -70,6 +77,8 @@ int main(int argc,char**argv){QCoreApplication app(argc,argv);QCoreApplication::
     WellInfo only=north;only.wellName="B-1";long long onlyId=0;check(bare.createWell(only,onlyId,error),error);
     ProjectPlanarRange wellsOnly;check(bare.readProjectPlanarRange(wellsOnly,error),error);
     check(wellsOnly.status=="partial"&&wellsOnly.merged.valid&&wellsOnly.merged.minX==499900&&wellsOnly.merged.maxX==499900&&wellsOnly.volumeCount==0,"wells-only area falls back to well MBR");
+    WellHeadRange singleHead;check(bare.readWellHeadRange(singleHead,error),error);
+    check(singleHead.status=="complete"&&singleHead.extent.minX==499900&&singleHead.extent.maxX==499900&&singleHead.extent.minY==4000050,"single well range is a point MBR");
     bare.closeProject();
-    std::cout<<"Seismic adapter checks passed: bounded section/time slice, real axes, missing traces, metadata, CRS, cancellation, coordinate range, project area union\n";return 0;
+    std::cout<<"Seismic adapter checks passed: bounded section/time slice, real axes, missing traces, metadata, CRS, cancellation, coordinate range, well head range, project area union\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

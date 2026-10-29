@@ -1,4 +1,5 @@
-// Business layer. 工区平面范围 = 井口点矩形 ∪ 地震体范围矩形；不做单位换算与投影。
+// Business layer. 三个范围接口：井口点 / 地震体 / 工区（两者并集）。
+// 并集与约定校验都在服务内完成，调用方只消费结果；不做单位换算与投影。
 #include "paleo_data/service.h"
 #include <algorithm>
 #include <cmath>
@@ -35,31 +36,51 @@ std::string conventionsOf(const PlanarExtent& extent){
     return extent.coordinateSystem+(extent.coordinateUnit.empty()?std::string():std::string(" / ")+extent.coordinateUnit);
 }
 }
-bool DataService::readProjectPlanarRange(ProjectPlanarRange& result,std::string& error,const CancelCheck& cancel) const{
+bool DataService::readWellHeadRange(WellHeadRange& result,std::string& error,const CancelCheck& cancel) const{
     result={};error.clear();try{
         if(stopped(cancel,error))return false;
-
-        // 井口点：只取实际坐标，缺坐标的井如实计数，不按 0 或井名补位。
+        // 只取实际坐标，缺坐标的井如实计数，不按 0 或井名补位。
         std::vector<WellInfoRecord> wells;
         if(!listWellInfos(wells,error))return false;
         result.wellCount=static_cast<int>(wells.size());
-        bool wellConventions=true;
+        bool consistent=true;
         for(const auto& row:wells){
             if(stopped(cancel,error))return false;
             const auto& well=row.value;
             if(!std::isfinite(well.wellheadX)||!std::isfinite(well.wellheadY)){++result.wellsWithoutCoordinates;continue;}
             ++result.wellsWithCoordinates;
-            grow(result.wells,well.wellheadX,well.wellheadY);
-            wellConventions&=declareConventions(result.wells.coordinateSystem,result.wells.coordinateUnit,well.coordinateSystem,well.coordinateUnit);
+            grow(result.extent,well.wellheadX,well.wellheadY);
+            consistent&=declareConventions(result.extent.coordinateSystem,result.extent.coordinateUnit,well.coordinateSystem,well.coordinateUnit);
         }
-        result.wells.pointCount=result.wellsWithCoordinates;
-        finish(result.wells);
-        if(!wellConventions){
-            discard(result.wells);
+        result.extent.pointCount=result.wellsWithCoordinates;
+        finish(result.extent);
+        if(!consistent){
+            discard(result.extent);
+            result.status="conventions-mismatch";
             result.warnings.push_back("井口坐标声明不一致：同一批井出现多种坐标系或单位，井点矩形不予给出。");
-        }else if(result.wellsWithoutCoordinates>0){
-            result.warnings.push_back("有"+std::to_string(result.wellsWithoutCoordinates)+"口井缺井口坐标，未参与井点矩形。");
+        }else if(result.wellsWithCoordinates==0){
+            result.status="unavailable";
+            result.warnings.push_back(result.wellCount==0?"工区没有登记井。":"登记的"+std::to_string(result.wellCount)+"口井都没有井口坐标，井点矩形不可得。");
+        }else{
+            result.status="complete";
+            if(result.wellsWithoutCoordinates>0)result.warnings.push_back("有"+std::to_string(result.wellsWithoutCoordinates)+"口井缺井口坐标，未参与井点矩形。");
         }
+        return true;
+    }catch(const std::exception& e){error=std::string("井口点范围读取失败：")+e.what();return false;}
+}
+bool DataService::readProjectPlanarRange(ProjectPlanarRange& result,std::string& error,const CancelCheck& cancel) const{
+    result={};error.clear();try{
+        if(stopped(cancel,error))return false;
+
+        // 井位一侧由井口点接口统一给出，调用方与本节共用同一口径。
+        WellHeadRange wellRange;
+        if(!readWellHeadRange(wellRange,error,cancel))return false;
+        result.wells=wellRange.extent;
+        result.wellCount=wellRange.wellCount;
+        result.wellsWithCoordinates=wellRange.wellsWithCoordinates;
+        result.wellsWithoutCoordinates=wellRange.wellsWithoutCoordinates;
+        for(const auto& warning:wellRange.warnings)result.warnings.push_back(warning);
+        const bool wellMismatch=wellRange.status=="conventions-mismatch";
 
         // 地震体：逐个取测区范围；不可读或范围不可得的体记入清单，不让整体失败。
         std::vector<DataEntry> volumes;
@@ -96,7 +117,7 @@ bool DataService::readProjectPlanarRange(ProjectPlanarRange& result,std::string&
 
         // 合并：两侧都可信且约定已确认一致才合并，否则只给各块矩形。
         const bool hasWells=result.wells.valid,hasSeismic=result.seismic.valid;
-        if(!wellConventions||!seismicConventions){
+        if(wellMismatch||!seismicConventions){
             result.status="conventions-mismatch";
             result.warnings.push_back("坐标声明冲突，未合并工区范围；需先统一坐标系与单位。");
         }else if(hasWells&&hasSeismic){

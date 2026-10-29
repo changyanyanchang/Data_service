@@ -97,12 +97,17 @@ if (ok && range.status == "complete" && range.coordinateUnit == "m") {
 
 ## 工区平面范围（井点 ∪ 地震）
 
-工区范围由两块最小外接矩形合并而成：全部井口点、全部地震体范围。`readProjectPlanarRange` 一次给出两块矩形和合并结果。
+工区范围由两块最小外接矩形合并而成：全部井口点、全部地震体范围。三个接口分工如下，合并与约定校验都在服务内完成，调用方只消费结果：
+
+| 接口 | 返回 |
+|---|---|
+| `readWellHeadRange` | 井口点 MBR（`WellHeadRange`，含井数、缺坐标井数、status） |
+| `readSeismicCoordinateRange` | 单个地震体的测区范围（号域 + 四角点 + 包围盒） |
+| `readProjectPlanarRange` | 工区范围：井点 MBR ∪ 全部地震体范围（`ProjectPlanarRange`） |
 
 ```cpp
 ProjectPlanarRange area;
 bool ok = service.readProjectPlanarRange(area, error);
-// 两块矩形各自可用，合并结果单独判断：
 // area.wells   井口点 MBR
 // area.seismic 地震体范围并集
 // area.merged  工区范围；status != complete/partial 时 valid=false
@@ -110,6 +115,8 @@ if (ok && area.merged.valid) {
     // area.merged.minX/minY/maxX/maxY：工区范围
 }
 ```
+
+只需要井位时直接调 `readWellHeadRange`，不必拉地震范围（`readProjectPlanarRange` 内部复用它，两者口径一致）。
 
 | status | 含义 |
 |---|---|
