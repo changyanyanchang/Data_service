@@ -231,6 +231,8 @@ public:
     // expectedSha256 binds it to readablePath; storedReference is interpreted
     // relative to this data project after its enclosing directory is published.
     // The caller owns parsing correctness and publication of that directory.
+    // Unresolved blocking issues reject the entire batch; failure leaves sourceId=0.
+    // Nonblocking issues are committed with source status "review".
     bool importPreparedFile(const std::string& readablePath, const std::string& identityPath,
                             const std::string& storedReference, const std::string& expectedSha256,
                             const ParsedFile& model, long long& sourceId, std::string& error,

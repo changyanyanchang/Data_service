@@ -44,8 +44,11 @@ expected full SHA-256. The reference may be relative to the data project for a
 relocatable managed source. This method neither copies nor rewrites the source.
 
 The service checks the source digest before storing and again before commit.
-Objects and the source record are committed together; shape errors, cancellation
-and content drift roll back both. It returns a database-local source ID. The host
+Objects and the source record are committed together; shape errors, cancellation,
+content drift and unresolved blocking issues roll back the entire batch, including
+changes to shared wells. On failure, the method returns false, leaves sourceId at
+zero, and reports the cause in error. Nonblocking issues remain stored and set the
+source status to review. Successful imports return a database-local source ID. The host
 must publish the resulting database with its own version journal and retain the
 explicit source/object mapping. The API does not make a second writable catalog
 or silently coordinate transactions across independently writable databases.
@@ -60,6 +63,11 @@ Close the writer before hashing/publishing its SQLite file, then use read-only
 sessions on consuming threads. A host using immutable versions should create a
 new prepared model for edits and reimports, rather than mutate a published model
 or ask the ordinary parser to reconstruct its host-specific interpretation.
+
+Prepared SEG-Y sources retain full SHA-256 identities. `relocateSource` and
+`verifySource` use the stored identity scheme; ordinary SEG-Y imports retain their
+existing quick fingerprints. Relocating a full-SHA source therefore reads the
+whole replacement file, without copying it or loading it all into memory.
 
 
 ### 工区级模型接入
@@ -76,6 +84,14 @@ VACUUM INTO 创建包含已提交 WAL 的一致数据库副本；目标必须不
 只有“测井曲线／离散曲线”工作表且首四列严格为“井号、深度、TVD、TVDSS”时
 使用 MD／米；其他表格的深度类型及单位继续保持未知。默认关闭此宿主约定，
 不改变独立服务对普通 SpreadsheetML 的保守解析；显式 depthUnit 优先。
+
+此选项参与导入去重：从默认关闭改为开启时，相同文件按新约定生成新批次，
+已有批次及其人工修改保留；继续使用相同配置则复用已有结果。修正旧批次应显式
+调用 reimportSource。默认关闭与旧版缓存签名兼容，不因升级重复发布原有数据。
+
+井位页中唯一、明确的井名可以用于同一工作簿内无井名的曲线页；多井或冲突
+声明不会自动归井。井底、轨迹和位移坐标列不会作为井口坐标导入，原始表格
+仍保留供核对。已缓存的旧解析结果需明确重新导入，避免覆盖已有人工修改。
 
 ## 文件关联与图谱接口
 

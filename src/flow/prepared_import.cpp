@@ -30,6 +30,21 @@ bool DataService::importPreparedFile(const std::string& readablePath,
     // Only this trusted host API bypasses guessed null tokens. Keep the public
     // ParseOptions layout and ordinary file-import defaults unchanged.
     if(!store.saveParsed(id,model,{},error,cancelled,true))return false;
+    // Storage can discover conflicts with existing wells even when the host's
+    // model was valid on its own. Do not publish a partially accepted model.
+    QSqlQuery issues;
+    if(!store.exec("SELECT code,message,blocking FROM issues WHERE source_id=? AND resolved=0 ORDER BY id",
+        {id},error,&issues))return false;
+    bool needsReview=false;
+    while(issues.next()) {
+        if(issues.value(2).toBool()) {
+            error="prepared import blocked by "+s(issues.value(0).toString())+": "+s(issues.value(1).toString());
+            return false; // Transaction rolls back this source, its issues and all objects.
+        }
+        needsReview=true;
+    }
+    issues.finish();
+    if(needsReview&&!store.exec("UPDATE sources SET status='review' WHERE id=?",{id},error))return false;
     // Recheck the bytes before publication; failure rolls back objects and source.
     if(!fullFileSha256(q(readablePath),digest,error,cancelled))return false;
     if(digest.compare(q(expectedSha256),Qt::CaseInsensitive)!=0) {

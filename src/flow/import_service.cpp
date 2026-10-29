@@ -53,7 +53,11 @@ static bool scanSignature(const QString& path,QString& signature,const CancelChe
 }
 static QString optionsJson(const ParseOptions& o){
     QJsonArray rules;for(auto& r:o.cleaningRules){QJsonArray nulls;for(double n:r.nullValues)nulls.append(n);rules.append(QJsonObject{{"curve",q(r.curveType)},{"unit",q(r.unit)},{"nulls",nulls},{"checkMin",r.checkMinimum},{"min",r.minimum},{"checkMax",r.checkMaximum},{"max",r.maximum},{"replace",r.replaceInvalidWithMissing}});}
-    return json(QJsonObject{{"parser_version",2},{"well",q(o.wellNameOverride)},{"crs",q(o.coordinateSystem)},{"unit",q(o.coordinateUnit)},{"depthUnit",q(o.depthUnit)},{"order",q(o.coordinateOrder)},{"rules",rules}});
+    QJsonObject config{{"parser_version",2},{"well",q(o.wellNameOverride)},{"crs",q(o.coordinateSystem)},{"unit",q(o.coordinateUnit)},{"depthUnit",q(o.depthUnit)},{"order",q(o.coordinateOrder)},{"rules",rules}};
+    // Missing means false, preserving the signature of existing default imports
+    // and their edits. Opting into MD/metres must invalidate both duplicate checks.
+    if(o.comprehensiveWellMetreDepth)config["comprehensiveWellMetreDepth"]=true;
+    return json(config);
 }
 static bool digestFile(const QString& path,QString& digest,const CancelCheck& cancelled,std::string& e,long long* bytesRead=nullptr){
     bool largeSegy=QStringList{"sgy","segy"}.contains(QFileInfo(path).suffix().toLower());
@@ -309,9 +313,14 @@ bool DataService::reimportSource(long long id,const ParseOptions& mapping,Import
     auto path=impl_->store.absolutePath(r.value(1).toString());ImportOptions options;options.parsing=mapping;options.forceNewBatch=true;return doImport(impl_->store,path,r.value(0).toString(),options,report,e,cancelled,id);
 }
 bool DataService::relocateSource(long long id,const std::string& path,std::string& e){
+    e.clear();
     QSqlQuery r;auto& st=impl_->store;if(!st.exec("SELECT hash,stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源不存在";return false;}
-    auto replacement=QFileInfo(q(path)).absoluteFilePath();QString digest;if(!digestFile(replacement,digest,{},e))return false;
-    if(digest!=r.value(0).toString()){e="新文件与记录身份不符，不能静默替换；请作为新资料导入。地震体身份包含文件大小、修改时间和文件头。";return false;}
+    const auto expected=r.value(0).toString();
+    auto replacement=QFileInfo(q(path)).absoluteFilePath();QString digest;
+    // Prepared sources use full SHA-256 even for SEG-Y. Match the stored identity
+    // scheme, just as verifySource does, instead of guessing from the extension.
+    if(expected.startsWith("quick:")?!digestFile(replacement,digest,{},e):!fullFileSha256(replacement,digest,e))return false;
+    if(digest!=expected){e="新文件与记录身份不符，不能静默替换；请作为新资料导入。";if(expected.startsWith("quick:"))e+="地震体快速身份包含文件大小、修改时间和文件头。";return false;}
     const QString previous=r.value(1).toString();r.finish();
     if(!st.begin(e))return false;
     QSqlQuery objects;if(!st.exec("SELECT id,kind,payload FROM well_objects WHERE source_id=? AND kind IN ('core_photos','attachments')",{id},e,&objects)){st.rollback();return false;}

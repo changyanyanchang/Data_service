@@ -18,14 +18,27 @@ static std::string utf8(const QString& s) { return s.toUtf8().toStdString(); }
 static void require(bool value,const std::string& why) {if(!value) throw std::runtime_error(why);}
 static const SourceCell* cell(const SourceTable& t,int r,int c) {for(const auto& x:t.cells)if(x.row==r&&x.column==c)return &x;return nullptr;}
 static int sampleCount(const ParsedFile& p) {int n=0;for(const auto&w:p.wells)for(const auto&t:w.wellbore.sampleTables)n+=int(t.samples.size());return n;}
+static int curveCount(const ParsedFile& p) {int n=0;for(const auto&w:p.wells)for(const auto&l:w.wellbore.logSets)n+=int(l.logCurves.size());return n;}
+static bool hasIssue(const ParsedFile& p,const std::string& code) {for(const auto&i:p.issues)if(i.code==code)return true;return false;}
+struct WorkbookSheet {QString name;QList<QStringList> rows;};
+static void workbook(const QString& path,const QList<WorkbookSheet>& sheets) {
+ QVector<paleo::data::zip::ZipWriteEntry> entries;
+ QByteArray book="<workbook xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets>",relations="<Relationships>";int index=0;
+ for(const auto& sheet:sheets) {
+  const auto id=QByteArray::number(++index);
+  book+="<sheet name=\""+sheet.name.toHtmlEscaped().toUtf8()+"\" sheetId=\""+id+"\" r:id=\"rId"+id+"\"/>";
+  relations+="<Relationship Id=\"rId"+id+"\" Target=\"worksheets/sheet"+id+".xml\"/>";
+  QByteArray xml="<worksheet><sheetData>";int r=0;
+  for(const auto& row:sheet.rows) {xml+="<row r=\""+QByteArray::number(++r)+"\">";for(const auto& text:row)xml+="<c t=\"inlineStr\"><is><t>"+text.toHtmlEscaped().toUtf8()+"</t></is></c>";xml+="</row>";}
+  xml+="</sheetData></worksheet>";
+  entries.push_back({QStringLiteral("xl/worksheets/sheet%1.xml").arg(index),xml});
+ }
+ entries.push_back({"xl/workbook.xml",book+"</sheets></workbook>"});
+ entries.push_back({"xl/_rels/workbook.xml.rels",relations+"</Relationships>"});
+ QString error;require(paleo::data::zip::zipWriteArchive(path,entries,{},&error),utf8(error));
+}
 static void workbook(const QString& path,const QString& name,const QList<QStringList>& rows) {
- QByteArray xml="<worksheet><sheetData>";int r=0;
- for(const auto& row:rows) {xml+="<row r=\""+QByteArray::number(++r)+"\">";for(const auto& text:row)xml+="<c t=\"inlineStr\"><is><t>"+text.toHtmlEscaped().toUtf8()+"</t></is></c>";xml+="</row>";}
- xml+="</sheetData></worksheet>";QString error;
- require(paleo::data::zip::zipWriteArchive(path,{
-  {"xl/workbook.xml","<workbook xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\""+name.toHtmlEscaped().toUtf8()+"\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>"},
-  {"xl/_rels/workbook.xml.rels","<Relationships><Relationship Id=\"rId1\" Target=\"worksheets/sheet1.xml\"/></Relationships>"},
-  {"xl/worksheets/sheet1.xml",xml}},{},&error),utf8(error));
+ workbook(path,QList<WorkbookSheet>{{name,rows}});
 }
 int main(int argc,char**argv) {
  QCoreApplication app(argc,argv);
@@ -94,6 +107,50 @@ int main(int argc,char**argv) {
   const auto& gammaSet=gammaData.wells.front().wellbore.logSets.front();
   require(gammaSet.logCurves.size()==5&&gammaSet.samplingAxis.depthValues.size()==2&&gammaSet.logCurves[3].sampleValues[1]==-2.0,"gamma arrays preserve values and descending depth order");
   require(gammaSet.depthInfo.depthUnit.empty()&&gammaSet.logCurves[3].curveUnit=="API","gamma explicit units only");
+  // Only the coordinate page names the well; the generic file/curve page do not.
+  const WorkbookSheet position{"井位",{{"井号","X","Y"},{"HZ99-1-1","300000","2360000"}}};
+  const WorkbookSheet unnamedCurve{"曲线",{{"井深(m)","GR"},{"100","80"},{"101","81"}}};
+  const auto combined=temp.filePath("combined.xlsx");
+  workbook(combined,{position,unnamedCurve});
+  const auto combinedData=parseAuxiliaryFile(utf8(combined),{},{});
+  require(combinedData.wells.size()==1&&combinedData.wells[0].wellInfo.wellName=="HZ99-1-1"&&curveCount(combinedData)==1,"unique coordinate-page well restores otherwise unnamed curves");
+  const auto& combinedSet=combinedData.wells[0].wellbore.logSets[0];
+  require(combinedData.wells[0].wellInfo.wellheadX==300000&&combinedSet.sourceSheet=="曲线"&&combinedSet.samplingAxis.depthValues==std::vector<double>({100,101})&&combinedSet.logCurves[0].sampleValues==std::vector<double>({80,81}),"combined workbook preserves location, curve values and sheet provenance");
+  for(const auto& secondX:QStringList{"310000","invalid"}) {
+   const auto multi=temp.filePath("multiple-wells-"+secondX+".xlsx");
+   workbook(multi,{{"井位",{{"井号","X","Y"},{"HZ99-1-1","300000","2360000"},{"XJ88-8-B1",secondX,"2361000"}}},unnamedCurve});
+   const auto parsed=parseAuxiliaryFile(utf8(multi),{},{});
+   require(curveCount(parsed)==0&&hasIssue(parsed,"well_mapping_needed")&&parsed.sourceTables.size()==2,"multiple declared wells cannot assign unnamed curves, even when one coordinate row is invalid");
+  }
+  const auto coordinateIdentityConflict=temp.filePath("coordinate-identity-conflict.xlsx");
+  workbook(coordinateIdentityConflict,{position,{"曲线",{{"井号：XJ88-8-B1",""},{"井深(m)","GR"},{"100","80"},{"101","81"}}}});
+  const auto coordinateConflictData=parseAuxiliaryFile(utf8(coordinateIdentityConflict),{},{});
+  require(curveCount(coordinateConflictData)==0&&hasIssue(coordinateConflictData,"well_mapping_needed")&&coordinateConflictData.sourceTables.size()==2,"coordinate-page identity cannot override a conflicting curve-page identity");
+  const auto coordinatePathConflict=temp.filePath("XJ88-8-B1-coordinate-conflict.xlsx");
+  workbook(coordinatePathConflict,{position,unnamedCurve});
+  const auto coordinatePathData=parseAuxiliaryFile(utf8(coordinatePathConflict),{},{});
+  require(coordinatePathData.wells.empty()&&hasIssue(coordinatePathData,"well_conflict")&&coordinatePathData.sourceTables.size()==2,"coordinate-page identity must be checked against the filename");
+
+  const auto semanticPosition=temp.filePath("semantic-coordinate.xlsx");
+  workbook(semanticPosition,"井位",{{"井号","井口X（纵坐标）(m)","井口Y（横坐标）(m)"},{"SYNTH-1","2360000","0"}});
+  const auto semanticData=parseAuxiliaryFile(utf8(semanticPosition),{},{});
+  require(semanticData.wells.size()==1&&semanticData.wells[0].wellInfo.wellheadX==0&&semanticData.wells[0].wellInfo.wellheadY==2360000,"explicit wellhead prefix and semantic axes preserve zero coordinates");
+  require(semanticData.wells[0].wellInfo.coordinateSystem.empty()&&semanticData.wells[0].wellInfo.coordinateUnit.empty(),"recognized coordinate label does not guess the coordinate reference");
+  const QList<QStringList> nonWellheadLabels={
+   {"井底横坐标","井底纵坐标"},{"轨迹横坐标","轨迹纵坐标"},{"横坐标位移(m)","纵坐标位移(m)"},
+   {"井口横坐标偏移","井口纵坐标偏移"},{"X（井底纵坐标）","Y（井底横坐标）"},{"X(Offset)","Y(Offset)"}};
+  int nonWellheadIndex=0;
+  for(const auto& labels:nonWellheadLabels) {
+   const auto qualified=temp.filePath(QStringLiteral("qualified-coordinate-%1.xlsx").arg(++nonWellheadIndex));
+   workbook(qualified,"位置",{{"井号",labels[0],labels[1]},{"SYNTH-1","300000","2360000"}});
+   const auto parsed=parseAuxiliaryFile(utf8(qualified),{},{});
+   require(parsed.wells.empty()&&parsed.status=="review"&&parsed.sourceTables.size()==1&&parsed.sourceTables[0].cells.size()==6,"bottomhole, trajectory and displacement columns must remain raw rather than become wellhead coordinates");
+   require(cell(parsed.sourceTables[0],1,2)->text==utf8(labels[0])&&cell(parsed.sourceTables[0],2,2)->text=="300000","rejected coordinate semantics preserve original labels and values");
+  }
+  const auto mixedPositions=temp.filePath("mixed-positions.xlsx");
+  workbook(mixedPositions,"井位",{{"井号","井口横坐标","井口纵坐标","井底横坐标","井底纵坐标"},{"SYNTH-1","300000","2360000","301000","2362000"}});
+  const auto mixedData=parseAuxiliaryFile(utf8(mixedPositions),{},{});
+  require(mixedData.wells.size()==1&&mixedData.wells[0].wellInfo.wellheadX==300000&&mixedData.wells[0].wellInfo.wellheadY==2360000,"separate bottomhole columns do not override or invalidate explicit wellhead columns");
   const auto survey=temp.filePath("XJ88-8-B1-Survey.xlsx");
   workbook(survey,"测斜",{{"MD\n(m)","Incl\n(°)","Azim Grid\n(°)"},{"0","0","300"},{"1","0.1","200"},{"2","181","1"}});
   const auto surveyData=parseAuxiliaryFile(utf8(survey),{},{});

@@ -355,7 +355,32 @@ bool isDepthHeader(const QString& t) {
 bool matches(const QString& t,const QStringList& keys) {const auto k=key(t);for(const auto& word:keys) if(k==word||k.startsWith(word+"(")||k.startsWith(word+QStringLiteral("（"))) return true;return false;}
 struct Block {int row=0,depth=0,bottom=0,separator=0,name=0,well=0,type=0,end=0,start=0; bool interval=false;};
 
-int mapCoordinates(ParsedFile& out,const ParseOptions& options,const CancelCheck& cancel,QSet<QString>& handled) {
+int wellheadCoordinateAxis(QString label) {
+    label=key(label);
+    if(label.startsWith(QStringLiteral("井口")))label.remove(0,2);
+    else if(label.startsWith("wellhead"))label.remove(0,8);
+    const auto parts=label.split(QRegularExpression(QStringLiteral("[()（）/,，]")),Qt::SkipEmptyParts);
+    int literalAxis=0,semanticAxis=0;
+    for(int i=0;i<parts.size();++i) {
+        const auto& part=parts[i];
+        if(QStringList{"m","ft","米","英尺","degree","degrees","度"}.contains(part)) {
+            if(i==0)return 0;
+            continue; // A unit label alone does not confirm the coordinate reference.
+        }
+        const int literal=part=="x"?1:part=="y"?2:0;
+        if(literal) {if(literalAxis)return 0;literalAxis=literal;continue;}
+        int semantic=0;
+        if(QStringList{"横坐标","东坐标","easting","east"}.contains(part))semantic=1;
+        else if(QStringList{"纵坐标","北坐标","northing","north"}.contains(part))semantic=2;
+        if(!semantic||semanticAxis)return 0;
+        semanticAxis=semantic;
+    }
+    // Match complete labels, not substrings: 井底横坐标/横坐标位移/X(轨迹)
+    // describe other positions. Preserve X(纵坐标)/Y(横坐标) axis conventions.
+    return semanticAxis?semanticAxis:literalAxis;
+}
+
+int mapCoordinates(ParsedFile& out,const ParseOptions& options,const CancelCheck& cancel,QSet<QString>& handled,QSet<QString>* declaredWells=nullptr) {
     int mapped=0;QSet<QString> blocked;
     for(const auto& table:out.sourceTables) {
         Rows headers;for(const auto& cell:table.cells)if(cell.row<=60)headers[cell.row][cell.column]=qs(cell.text);
@@ -363,14 +388,10 @@ int mapCoordinates(ParsedFile& out,const ParseOptions& options,const CancelCheck
         for(auto header=headers.cbegin();header!=headers.cend();++header) {
             int name=0,x=0,y=0;bool ambiguous=false,depth=false;
             for(auto c=header->cbegin();c!=header->cend();++c) {
-                const auto label=key(c.value());int axis=0;
+                const auto label=key(c.value());
                 if(isDepthHeader(label)||matches(label,{"tvd","tvdss","顶深","底深"}))depth=true;
                 if(matches(label,{"井号","井名","well","wellname","well_name"})) {if(name)ambiguous=true;name=c.key();}
-                // Semantic labels take precedence over the literal X/Y prefixes.
-                if(label.contains(QStringLiteral("横坐标"))||label.contains(QStringLiteral("东坐标")))axis=1;
-                else if(label.contains(QStringLiteral("纵坐标"))||label.contains(QStringLiteral("北坐标")))axis=2;
-                else if(matches(label,{"x","easting","east"}))axis=1;
-                else if(matches(label,{"y","northing","north"}))axis=2;
+                const int axis=wellheadCoordinateAxis(label);
                 if(axis==1){if(x)ambiguous=true;x=c.key();}
                 if(axis==2){if(y)ambiguous=true;y=c.key();}
             }
@@ -383,6 +404,7 @@ int mapCoordinates(ParsedFile& out,const ParseOptions& options,const CancelCheck
                 if((r.key()%128)==0&&stopped(cancel))return -1;
                 const auto wellName=qs(canonicalWellName(ss(r->value(name))));
                 if(wellName.isEmpty())continue;
+                if(declaredWells)declaredWells->insert(wellName);
                 double vx=Missing,vy=Missing;
                 const bool duplicate=seen.contains(wellName);seen.insert(wellName);
                 if(duplicate||!numeric(r->value(x),vx)||!numeric(r->value(y),vy)) {
@@ -405,7 +427,7 @@ int mapCoordinates(ParsedFile& out,const ParseOptions& options,const CancelCheck
     }return mapped;
 }
 
-QString workbookWell(ParsedFile& out,const ParseOptions& options,const QSet<QString>& ignored) {
+QString workbookWell(ParsedFile& out,const ParseOptions& options,const QSet<QString>& ignored,const QSet<QString>& coordinateWells) {
     if(!options.wellNameOverride.empty()) return qs(options.wellNameOverride).trimmed().toUpper();
     const auto fromPath=pathWell(qs(options.sourceContextPath.empty()?out.path:options.sourceContextPath));QSet<QString> declared;
     for(const auto& table:out.sourceTables) {
@@ -427,6 +449,10 @@ QString workbookWell(ParsedFile& out,const ParseOptions& options,const QSet<QStr
             declared.unite(names);
         }
     }
+    // A single-well coordinate page can identify the other pages. Keep every
+    // declared row name (even invalid XY), so a multi-well table never becomes
+    // a single-well fallback just because only one location parsed successfully.
+    if(coordinateWells.size()==1)declared.unite(coordinateWells);
     if(!fromPath.isEmpty()) {
         for(const auto& name:declared) if(name!=fromPath) issue(out,"well_conflict","工作簿井号与文件或目录井号不一致；请核对原资料后指定井名重新导入",{},0,true,name+" / "+fromPath);
         return fromPath;
@@ -849,9 +875,9 @@ ParsedFile parseAuxiliaryFile(const std::string& path,const ParseOptions& option
         out.kind="workbook";QString error;
         if(!readWorkbook(info.filePath(),out,cancelled,error)) {out.status="failed";out.message=ss(error);out.sourceTables.clear();return out;}
         if(stopped(cancelled)) {out.status="failed";out.message="已取消";out.sourceTables.clear();return out;}
-        QSet<QString> handledSheets;
-        const int coordinates=mapCoordinates(out,options,cancelled,handledSheets);
-        const auto well=workbookWell(out,options,handledSheets);
+        QSet<QString> handledSheets,coordinateWells;
+        const int coordinates=mapCoordinates(out,options,cancelled,handledSheets,&coordinateWells);
+        const auto well=workbookWell(out,options,handledSheets,coordinateWells);
         const int cards=mapGrainCards(out,options,cancelled,well,handledSheets);
         const int series=cards<0?-1:mapWellSeries(out,options,cancelled,well,handledSheets);
         const int rows=series<0?-1:mapSamples(out,options,cancelled,handledSheets,well);

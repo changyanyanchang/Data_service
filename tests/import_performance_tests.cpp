@@ -101,6 +101,52 @@ void cacheAndEdits(const QString& root){
     check(sourceCount(service)==3,"forced batch is published");
 }
 
+void comprehensiveDepthOptionInvalidatesCache(const QString& root){
+    // Exact exporter headers make this fixture sensitive to the host-confirmed
+    // MD/metre option. The source bytes never change between the three imports.
+    const QByteArray bytes=R"XML(<?xml version="1.0"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="测井曲线-HZ97-1-1井"><Table>
+<Row><Cell><Data>井号</Data></Cell><Cell><Data>深度</Data></Cell><Cell><Data>TVD</Data></Cell><Cell><Data>TVDSS</Data></Cell><Cell><Data>GR</Data></Cell></Row>
+<Row><Cell><Data>HZ97-1-1</Data></Cell><Cell><Data>100</Data></Cell><Cell><Data>99</Data></Cell><Cell><Data>-20</Data></Cell><Cell><Data>42</Data></Cell></Row>
+<Row><Cell><Data>HZ97-1-1</Data></Cell><Cell><Data>101</Data></Cell><Cell><Data>100</Data></Cell><Cell><Data>-19</Data></Cell><Cell><Data>43</Data></Cell></Row>
+<Row><Cell><Data>HZ97-1-1</Data></Cell><Cell><Data>102</Data></Cell><Cell><Data>101</Data></Cell><Cell><Data>-18</Data></Cell><Cell><Data>44</Data></Cell></Row>
+</Table></Worksheet></Workbook>)XML";
+    // Exercise both the direct importer and the directory worker preparation,
+    // with both bounded scan-cache reuse and full SHA duplicate detection.
+    for(bool parallel:{false,true})for(bool strict:{false,true}){
+        const QString name=QStringLiteral("depth-option-%1-%2").arg(parallel).arg(strict);
+        const QString project=root+"/"+name+"-project",input=root+"/"+name+"-input";
+        check(QDir().mkpath(input),"create depth-option fixture directory");
+        const QString path=input+"/HZ97-1-1.xml";writeFile(path,bytes);
+        DataService service;std::string error;check(service.createProject(utf8(project),utf8(name),error),error);
+        ImportOptions options;options.copySources=false;options.verifyUnchangedFiles=strict;options.parserThreads=parallel?2:1;
+        ImportReport report;
+        const auto runImport=[&]{return parallel?service.importDirectory(utf8(input),options,report,error):service.importFile(utf8(path),options,report,error);};
+        check(runImport(),error);
+        check(report.seen==1&&report.skipped==0&&report.cached==0,"first unconfirmed import is parsed");
+        std::vector<DataEntry> curves;check(service.listData("curves",0,curves,error)&&curves.size()==1,"unconfirmed export contains one curve");
+        const auto oldCurve=curves.front().id;LogSet log;
+        check(service.readLogSet(curves.front().parentId,true,log,error),error);
+        check(log.depthInfo.depthType.empty()&&log.depthInfo.depthUnit.empty(),"unconfirmed depth stays unknown");
+        check(service.updateCurveValue(oldCurve,0,84,error),error);
+
+        options.parsing.comprehensiveWellMetreDepth=true;
+        check(runImport(),error);
+        check(report.skipped==0&&report.cached==0&&report.hashedBytes==bytes.size(),"changed exporter contract bypasses scan cache and SHA duplicate shortcut");
+        check(service.listData("curves",0,curves,error)&&curves.size()==2&&sourceCount(service)==2,"changed depth contract publishes a separate interpretation");
+        const auto confirmedCurve=curves.back().id;
+        check(service.readLogSet(curves.back().parentId,true,log,error),error);
+        check(log.depthInfo.depthType=="MD"&&log.depthInfo.depthUnit=="m","confirmed depth convention is persisted and returned");
+        check(log.samplingAxis.depthValues==std::vector<double>{100,101,102}&&log.logCurves.front().sampleValues==std::vector<double>{42,43,44},"changing convention preserves original depth and curve numbers");
+        checkEditedCurve(service,oldCurve);
+        check(service.updateCurveValue(confirmedCurve,0,84,error),error);
+
+        check(runImport(),error);
+        check(report.skipped==1&&report.cached==(strict?0:1)&&report.hashedBytes==(strict?bytes.size():0),"same confirmed contract reuses the existing interpretation");
+        check(report.workerCount==(parallel?2:1)&&sourceCount(service)==2,"repeat keeps worker route and source IDs");
+        checkEditedCurve(service,confirmedCurve);checkEditedCurve(service,oldCurve);
+    }
+}
+
 void changedAndMissing(const QString& root){
     const QString project=root+"/changed-project",path=root+"/HZ92-1-1.las";
     const QByteArray bytes=las("HZ92-1-1");writeFile(path,bytes);
@@ -310,10 +356,10 @@ int main(int argc,char** argv){
     QCoreApplication app(argc,argv);
     try{
         QTemporaryDir temp;check(temp.isValid(),"temporary fixture root");
-        cacheAndEdits(temp.path());changedAndMissing(temp.path());sampledChangedBytes(temp.path());
+        cacheAndEdits(temp.path());comprehensiveDepthOptionInvalidatesCache(temp.path());changedAndMissing(temp.path());sampledChangedBytes(temp.path());
         failedFileRetry(temp.path());directoryProgressAndCancel(temp.path());changedDuringParse(temp.path());legacyMigration(temp.path());
         parallelEquivalent(temp.path());cancelPreparedWorkers(temp.path());
-        std::cout<<"PASS import performance: cache/reopen/manual edits, strict verification, options/force batches, changed/missing source, sampled changes, failed retries, staged progress, scan cancellation, unstable source, legacy migration, serial/parallel equivalence, staging budget, worker cancellation\n";
+        std::cout<<"PASS import performance: cache/reopen/manual edits, strict verification, options/force batches, comprehensive depth option invalidation, changed/missing source, sampled changes, failed retries, staged progress, scan cancellation, unstable source, legacy migration, serial/parallel equivalence, staging budget, worker cancellation\n";
         return 0;
     }catch(const std::exception& e){std::cerr<<"FAIL import performance: "<<e.what()<<'\n';return 1;}
 }
