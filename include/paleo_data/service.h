@@ -2,6 +2,7 @@
 #include "parser.h"
 #include "seismic.h"
 #include "graph.h"
+#include <utility>
 #include "interpretation.h"
 #include <memory>
 #include <cstdint>
@@ -363,6 +364,17 @@ public:
     bool saveSection(long long& id, const SeismicSection& section, std::string& error);
     bool readSection(long long id, SeismicSection& result, std::string& error) const;
     // 快速核验外部SEG-Y。仅返回文件事实，不替用户确认CRS、TWT或时间基准。
+    // Detached read-only files use the same data-service readers; no import or database write.
+    static bool inspectSeismicFile(const std::string& path, SeismicFileInfo& result, std::string& error, const CancelCheck& cancelled={});
+    static bool readSeismicFileLine(const std::string& path, const std::string& direction, int lineNumber,
+        const SectionReadOptions& options, SeismicSectionResult& result, std::string& error, const CancelCheck& cancelled={});
+    static bool readSeismicFileTimeSlice(const std::string& path, double timeMs, const TimeSliceReadOptions& options,
+        SeismicTimeSliceResult& result, std::string& error, const CancelCheck& cancelled={});
+    // Ordered inline/crossline path, independent of unconfirmed map-coordinate conventions.
+    bool readSeismicGridSection(long long volumeId, const std::vector<std::pair<int,int>>& path,
+        int maxColumns, bool interpolate, bool keepOutside, SeismicSectionResult& result, std::string& error, const CancelCheck& cancelled={});
+    static bool readSeismicFileGridSection(const std::string& file, const std::vector<std::pair<int,int>>& path,
+        int maxColumns, bool interpolate, bool keepOutside, SeismicSectionResult& result, std::string& error, const CancelCheck& cancelled={});
     bool inspectSeismic(long long volumeId, SeismicFileInfo& result, std::string& error, const CancelCheck& cancelled={});
     // 测区平面坐标范围（四角点+包围盒）。volumeId 取 listData("volumes") 的编号，
     // 与 inspectSeismic/readSeismicLine 同一来源校验。返回 true 只表示调用成功：
