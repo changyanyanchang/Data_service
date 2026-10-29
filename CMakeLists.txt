@@ -88,6 +88,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/file_graph_tests.cpp")
   target_link_libraries(file_graph_tests PRIVATE paleo_data_service Qt6::Core Qt6::Sql)
   add_test(NAME file_graph_contract COMMAND file_graph_tests)
 endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/coordinate_system_tests.cpp")
+  add_executable(coordinate_system_tests tests/coordinate_system_tests.cpp)
+  target_link_libraries(coordinate_system_tests PRIVATE paleo_data_service Qt6::Core Qt6::Sql)
+  add_test(NAME coordinate_system_contract COMMAND coordinate_system_tests)
+endif()
 endif() # PDS_BUILD_TESTS
 
 if(PDS_INSTALL)

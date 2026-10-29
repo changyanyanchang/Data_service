@@ -25,6 +25,7 @@ bool ProjectStore::saveParsed(long long sourceId,const ParsedFile& file,const Pa
         long long wid;if(!ensureWell(well.wellInfo,wid,e))return false;
         const auto& w=well.wellInfo;
         if(std::isfinite(w.wellheadX)&&std::isfinite(w.wellheadY)){
+            if(!saveCoordinateSystemCandidate(sourceId,"well",wid,w.coordinateSystem,w.coordinateUnit,e))return false;
             QSqlQuery old;if(!exec("SELECT x,y,crs,unit FROM wells WHERE id=?",{wid},e,&old))return false;old.next();
             if(!old.value(0).isNull()&&(old.value(0).toDouble()!=w.wellheadX||old.value(1).toDouble()!=w.wellheadY||old.value(2).toString()!=q(w.coordinateSystem)||old.value(3).toString()!=q(w.coordinateUnit))){
                 if(!exec("INSERT INTO issues(source_id,code,message,original_text,blocking) VALUES(?,?,?,?,1)",{sourceId,"coordinate_conflict",q(w.wellName)+" 的井坐标与已保存记录不同，未覆盖",QString("%1,%2").arg(w.wellheadX,0,'g',16).arg(w.wellheadY,0,'g',16)},e))return false;
@@ -92,6 +93,6 @@ bool ProjectStore::saveParsed(long long sourceId,const ParsedFile& file,const Pa
         for(const auto& cell:t.cells){int c=0;columns[c++]<<tid;columns[c++]<<cell.row;columns[c++]<<cell.column;columns[c++]<<q(cell.text);}
         if(!insertRows(query,columns))return false;
     }
-    return true;
+    return saveParsedCoordinateSystems(sourceId,file,e);
 }
 }

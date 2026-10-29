@@ -51,6 +51,7 @@ bool DataService::deleteData(const std::string& kind,long long id,std::string& e
     QString table;if(kind=="curves")table="curves";else if(kind=="interval")table="intervals";else if(kind=="intervals")table="tracks";else if(kind=="samples")table="sample_tables";else if(kind=="horizons")table="horizons";else if(kind=="maps")table="maps";else if(kind=="volumes")table="volumes";else if(kind=="sections")table="sections";else if(kind=="tables")table="source_tables";else if(kind=="well"||kind=="wells")table="wells";else if(kind=="source")table="sources";else{e="不支持删除该类别";return false;}
     auto& st=impl_->store;if(!rowExists(st,table,id,e))return false;if(!st.begin(e))return false;
     bool ok=true;if(kind=="source")ok=st.removeSourceObjects(id,e)&&st.exec("UPDATE sources SET status='removed',message='业务数据已移除，原始资料仍保留' WHERE id=?",{id},e);else ok=st.exec("DELETE FROM "+table+" WHERE id=?",{id},e);
+    if(kind=="source")ok=ok&&st.updateProjectCoordinateSystem(e);
     ok=ok&&recordChange(st,q(kind),id,"删除业务记录，保留原始文件",e)&&st.commit(e);if(!ok){st.rollback();if(e.find("FOREIGN KEY")!=std::string::npos)e="该对象仍被其他数据引用，请先处理关联";}return ok;
 }
 bool DataService::readMap(long long id,GeologicalMap& m,std::string& e)const{

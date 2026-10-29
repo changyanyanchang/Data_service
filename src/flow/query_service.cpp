@@ -25,7 +25,7 @@ bool DataService::setProjectCrs(const std::string& epsg,const std::string& unit,
     if(impl_->store.readOnly){e="只读工区不能修改坐标系";return false;}
     const auto code=q(epsg).trimmed().toUpper();bool digits=false;const auto number=code.mid(5).toLongLong(&digits);
     if(!code.startsWith("EPSG:")||!digits||number<=0){e="坐标系须采用 EPSG:<数字> 格式";return false;}
-    return impl_->store.exec("INSERT OR REPLACE INTO ds_meta(key,value) VALUES('project_crs',?),('project_crs_unit',?)",{code,q(unit).trimmed()},e);
+    return impl_->store.exec("INSERT OR REPLACE INTO ds_meta(key,value) VALUES('project_crs',?),('project_crs_unit',?),('project_crs_basis','manual')",{code,q(unit).trimmed()},e);
 }
 bool DataService::listWells(std::vector<WellSummary>& out,std::string& e)const{
     out.clear();QSqlQuery r;if(!impl_->store.exec("SELECT w.id,w.name,(SELECT count(*) FROM log_sets WHERE well_id=w.id),(SELECT count(*) FROM curves c JOIN log_sets l ON l.id=c.set_id WHERE l.well_id=w.id),(SELECT count(*) FROM tracks WHERE well_id=w.id),(SELECT count(*) FROM samples a JOIN sample_tables t ON t.id=a.table_id WHERE t.well_id=w.id),(SELECT count(*) FROM well_objects WHERE well_id=w.id AND kind='time_depth'),(SELECT count(*) FROM well_objects WHERE well_id=w.id AND kind='trajectories'),(w.x IS NOT NULL AND w.y IS NOT NULL),(SELECT coalesce(sum(json_array_length(payload)),0) FROM well_objects WHERE well_id=w.id AND kind='core_photos'),(SELECT count(*) FROM well_objects WHERE well_id=w.id AND kind='attachments'),(SELECT count(*) FROM well_objects WHERE well_id=w.id AND kind='markers') FROM wells w ORDER BY name",{},e,&r))return false;

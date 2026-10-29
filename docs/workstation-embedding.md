@@ -114,3 +114,25 @@ SHA-256、状态和原始类别，宿主可据此选择交互和渲染方式。
 
 旧工区在可写打开时增量增加 `source_relations` 表，保留原 schema_version 和已有
 ID。只读打开不升级；旧格式仍可构建业务关系图，人工关系视为空。
+
+## 工程坐标系统的自动采集与查询
+
+目录或单文件导入会从明确声明中收集坐标系统：Petrel 井口表头、显式
+`ParseOptions.coordinateSystem/coordinateUnit`、预处理模型中的井位/地震体/层位，
+以及已核实配准的图件。空间伴随 `.crsmeta.xml` 的显式 `AuthorityCode` 也会登记为
+来源级候选。没有井口 X/Y 的井、未核实配准的图件以及单纯的坐标数值不会生成候选。
+不会根据经纬度范围、投影坐标数量级、文件名或目录猜测 EPSG。
+
+候选与对象在同一文件事务中发布，并保存在 `source_coordinate_systems`。
+当全部有效候选规范化为同一个明确 EPSG，且非空坐标单位不冲突时，服务自动设置
+`project_crs/project_crs_unit`，并把 `project_crs_basis` 设为 `import`。出现不同
+CRS 或不同非空单位时，自动选择会被撤销；仅有非 EPSG 名称时保留候选但不猜测代码。
+`setProjectCrs` 将选择依据设为 `manual`，后续导入绝不覆盖人工选择。
+
+主系统调用 `readProjectCrsInfo` 获取当前 `coordinateSystem/coordinateUnit`、
+`selectionBasis`、`hasConflict` 和全部 `ProjectCrsCandidate`。候选带来源 ID、
+来源路径、对象类别和对象 ID，便于展示冲突依据；`projectCrs/projectCrsUnit`
+和 `readProjectCoordinates` 的轻量契约保持不变。本接口不执行坐标转换。
+
+旧工区可写打开时只增加候选表，不根据旧对象反推或补造来源声明；新导入或明确
+重导入会采集候选。只读打开不迁移，旧格式仍可读取已保存的工程 CRS，候选返回空。

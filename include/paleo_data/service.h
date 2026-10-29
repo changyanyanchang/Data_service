@@ -85,6 +85,17 @@ struct IntervalTrackResult { long long trackId=0,wellId=0; std::string name; Dep
 // Plot input keeps groups, source IDs and conventions separate. No file reparse,
 // interpolation, implicit CRS inheritance or coordinate transformation is performed.
 struct ProjectCoordinates { std::string coordinateSystem, coordinateUnit; };
+struct ProjectCrsCandidate {
+    long long sourceId=0, objectId=0;
+    std::string objectKind; // well, volume, horizon, map, or source-level spatial metadata.
+    std::string sourcePath, coordinateSystem, coordinateUnit;
+};
+struct ProjectCrsInfo {
+    std::string coordinateSystem, coordinateUnit;
+    std::string selectionBasis; // manual, import, or empty when no project CRS is selected.
+    bool hasConflict=false;
+    std::vector<ProjectCrsCandidate> candidates;
+};
 struct WellPlotLog { DataEntry entry; LogSet value; };
 struct WellPlotIntervals { DataEntry entry; IntervalTrack value; };
 struct WellPlotMarkers { DataEntry entry; MarkerTrack value; };
@@ -218,6 +229,8 @@ public:
     std::string projectCrsUnit() const;
     bool setProjectCrs(const std::string& epsg, const std::string& unit, std::string& e);
     bool readProjectCoordinates(ProjectCoordinates& result, std::string& error) const;
+    // Current selection plus explicit import candidates and conflicts. No CRS inference or transformation.
+    bool readProjectCrsInfo(ProjectCrsInfo& result, std::string& error) const;
     // Only explicit stored business-object relations; no name/folder inference.
     bool listSourceWells(long long sourceId, std::vector<long long>& result, std::string& error) const;
     // One SQLite read snapshot. Read-only sessions supported; output remains empty

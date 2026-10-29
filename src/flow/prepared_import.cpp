@@ -51,6 +51,7 @@ bool DataService::importPreparedFile(const std::string& readablePath,
         error="source changed while storing the prepared model"; return false;
     }
     if(cancelled&&cancelled()) { error="cancelled"; return false; }
+    if(!store.updateProjectCoordinateSystem(error))return false;
     if(!transaction.commit(error))return false;
     sourceId=id; return true;
 }

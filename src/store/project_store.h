@@ -34,6 +34,9 @@ public:
     bool commit(std::string& error);
     void rollback();
     bool saveParsed(long long sourceId,const ParsedFile& file,const ParseOptions& options,std::string& error,const CancelCheck& cancelled={},bool inputNullsResolved=false);
+    bool saveCoordinateSystemCandidate(long long sourceId,const std::string& objectKind,long long objectId,const std::string& crs,const std::string& unit,std::string& error);
+    bool saveParsedCoordinateSystems(long long sourceId,const ParsedFile& file,std::string& error);
+    bool updateProjectCoordinateSystem(std::string& error);
     bool removeSourceObjects(long long sourceId,std::string& error);
     bool ensureWell(const WellInfo& info,long long& id,std::string& error);
     QString absolutePath(const QString& storedPath) const;

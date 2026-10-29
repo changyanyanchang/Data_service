@@ -199,6 +199,7 @@ static bool doImport(ProjectStore& store,const QString& input,const QString& ide
     if(!store.exec("RELEASE parsed_objects",{},e)){store.rollback();return false;}
     if(replaceId&&good&&!blocked){if(!store.removeSourceObjects(replaceId,e)||!store.exec("UPDATE issues SET resolved=1,resolution='已按明确映射重新导入；请查看新批次问题' WHERE source_id=?",{replaceId},e)){store.rollback();return false;}}
     if(parsed.status!="failed"&&!saveCache(sourceId)){store.rollback();return false;}
+    if(!store.updateProjectCoordinateSystem(e)){store.rollback();return false;}
     if(!store.commit(e)){store.rollback();return false;}countStatus(parsed.status,report);
     if(parsed.status=="failed"){e=parsed.message.empty()?"文件解析失败":parsed.message;return false;}return true;
 }
