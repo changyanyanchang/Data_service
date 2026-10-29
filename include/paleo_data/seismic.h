@@ -37,6 +37,41 @@ struct SeismicFileInfo {
     std::vector<std::string> warnings;
 };
 
+// 测区平面范围的一个角点。顺序固定为
+// (inlineMin,crosslineMin) (inlineMin,crosslineMax) (inlineMax,crosslineMax)
+// (inlineMax,crosslineMin)，与宿主工程既有的测区角点约定一致。
+// 坐标是测网仿射在该格点上的取值；拟合不可用时为 Missing，不以相邻格点替代。
+struct SeismicCoordinateCorner {
+    int inlineNumber = 0;
+    int crosslineNumber = 0;
+    double x = Missing, y = Missing;
+    bool tracePresent = false; // 该格点是否有实际道；false 表示角点由仿射给出而非实测道位置
+};
+
+// 地震体平面坐标范围：测线号域 + 四角点 + 包围盒 + 拟合精度。
+// 与 SeismicFileInfo 的分工：那里报告文件自身抽查到的事实，这里把那些事实
+// 换算成可直接上图或裁剪的平面范围。范围只覆盖已确认存在的测线格点，
+// 不填补缺道、不外推到测网之外，也不做任何投影换算。
+// 号域与坐标可能分别不可得：status 说明是哪一层缺失，不要用 0 顶替 Missing。
+struct SeismicCoordinateRange {
+    long long volumeId = 0;
+    std::string dataFile;
+    std::string coordinateSystem; // 与 SeismicVolume.geometry 一致；空表示未确认
+    std::string coordinateUnit;   // m/ft；空表示未确认
+    std::string geometryStatus;   // sampled-regular / full-header-index / unavailable
+    int inlineMin = 0, inlineMax = 0, inlineStep = 0, inlineCount = 0;
+    int crosslineMin = 0, crosslineMax = 0, crosslineStep = 0, crosslineCount = 0;
+    std::vector<SeismicCoordinateCorner> corners; // complete 时 4 个；坐标不可得时为空
+    double minX = Missing, minY = Missing, maxX = Missing, maxY = Missing; // 角点包围盒
+    bool affineValid = false;     // 抽样道头是否拟合出可用的测网仿射
+    int fitHeaderSamples = 0;     // 参与拟合的道头数；0 表示未拟合
+    double fitRmsResidual = Missing, fitMaxResidual = Missing; // 坐标单位，越界即不可信
+    // complete：号域与四角点齐全；xy-unavailable：缺可验证的平面XY或拟合失败，
+    // 只返回号域；grid-unavailable：连规则测线网格都未确认，号域也不返回。
+    std::string status;
+    std::vector<std::string> warnings;
+};
+
 struct SeismicTraceReadOptions {
     int firstSample = 0;           // 从第几个样点开始，0为首样点。
     int sampleCount = 0;           // 0表示读取到本道末尾。

@@ -155,6 +155,72 @@ bool DataService::inspectSeismic(long long volumeId,SeismicFileInfo& result,std:
         return segy_detail::inspectSegyFile(volume.dataFile,result,error,cancel);
     }catch(const std::exception& e){return reject(error,std::string("地震检查失败：")+e.what());}
 }
+// 测区平面范围：号域来自抽样规则网格，角点由抽样道头拟合的测网仿射给出。
+// 三层可用性分别报告（网格 / 坐标 / 角点），任何一层缺失都不编造数值：
+// 号域不可得不给号域，拟合不可用不给角点，缺测线的角点如实标注 tracePresent=false。
+bool DataService::readSeismicCoordinateRange(long long volumeId,SeismicCoordinateRange& result,std::string& error,const CancelCheck& cancel) const {
+    result={};error.clear();try{
+        if(stopped(cancel,error))return false;
+        SeismicVolume volume;if(!sourceVolume(*this,volumeId,volume,error))return false;
+        result.volumeId=volumeId;result.dataFile=volume.dataFile;
+        result.coordinateSystem=volume.geometry.coordinateSystem;result.coordinateUnit=volume.geometry.coordinateUnit;
+        segy_detail::Reader reader;if(!reader.open(volume.dataFile,error,cancel,true))return false;
+        if(stopped(cancel,error))return false;
+        const auto& facts=reader.info();result.geometryStatus=facts.geometryStatus;
+        const auto& inlines=reader.inlines();const auto& crosslines=reader.crosslines();
+        if(inlines.empty()||crosslines.empty()){
+            result.status="grid-unavailable";
+            result.warnings.push_back("无法在有界抽查中确认规则测线网格：测线号域与平面范围均未给出，需先建立完整道头索引。");
+            return true;
+        }
+        const int inlineMin=inlines.front(),inlineMax=inlines.back();
+        const int crosslineMin=crosslines.front(),crosslineMax=crosslines.back();
+        result.inlineMin=inlineMin;result.inlineMax=inlineMax;result.inlineStep=facts.inlineStep;result.inlineCount=facts.inlineCount;
+        result.crosslineMin=crosslineMin;result.crosslineMax=crosslineMax;result.crosslineStep=facts.crosslineStep;result.crosslineCount=facts.crosslineCount;
+        if(!reader.hasCoordinateMap()){
+            result.status="xy-unavailable";
+            result.warnings.push_back("SEG-Y道头缺少可验证的平面XY坐标，或抽查道头坐标单位码不一致：只返回测线号域，不给出平面范围。");
+            return true;
+        }
+        result.affineValid=true;result.fitHeaderSamples=reader.coordinateSampleCount();
+        result.fitRmsResidual=reader.coordinateRmsResidual();result.fitMaxResidual=reader.maxCoordinateResidual();
+        const int inlineCorners[4]={inlineMin,inlineMin,inlineMax,inlineMax};
+        const int crosslineCorners[4]={crosslineMin,crosslineMax,crosslineMax,crosslineMin};
+        bool complete=true;int absentCorners=0;
+        for(int corner=0;corner<4;++corner){
+            if(stopped(cancel,error))return false;
+            SeismicCoordinateCorner point;point.inlineNumber=inlineCorners[corner];point.crosslineNumber=crosslineCorners[corner];
+            point.tracePresent=reader.traceIndex(point.inlineNumber,point.crosslineNumber)>=0;
+            if(!point.tracePresent)++absentCorners;
+            double x=Missing,y=Missing;
+            if(reader.mapLine(point.inlineNumber,point.crosslineNumber,x,y)&&std::isfinite(x)&&std::isfinite(y)){
+                point.x=x;point.y=y;
+                result.minX=std::isfinite(result.minX)?std::min(result.minX,x):x;
+                result.maxX=std::isfinite(result.maxX)?std::max(result.maxX,x):x;
+                result.minY=std::isfinite(result.minY)?std::min(result.minY,y):y;
+                result.maxY=std::isfinite(result.maxY)?std::max(result.maxY,y):y;
+            }else complete=false;
+            result.corners.push_back(point);
+        }
+        if(!complete){
+            // 角点换算失败时不保留半个多边形：清空角点与包围盒，只留号域。
+            result.status="xy-unavailable";result.corners.clear();
+            result.minX=result.minY=result.maxX=result.maxY=Missing;
+            result.warnings.push_back("测网仿射无法换算全部四个角点：只返回测线号域，不给出平面范围。");
+            return true;
+        }
+        result.status="complete";
+        if(absentCorners)result.warnings.push_back("有"+std::to_string(absentCorners)+"个角点上没有实际地震道：该角点坐标由测网仿射给出，不代表实测道位置。");
+        if(facts.geometryStatus=="sampled-regular")result.warnings.push_back("测线号域与角点来自有界抽查确认的规则网格；未全文件扫描，逐道读取时仍复核实际道头。");
+        if(result.coordinateUnit.empty())result.warnings.push_back("地震体坐标系与坐标单位尚未确认：坐标数值沿用来源道头单位，未做任何投影换算。");
+        if(facts.coordinateUnitsCode!=0&&facts.coordinateUnitsCode!=1)result.warnings.push_back("道头坐标单位码"+std::to_string(facts.coordinateUnitsCode)+"不是长度单位，XY可能不是平面长度。");
+        // 只在单位已确认时给出精度判定；未知单位下只报告残差数值，不臆断容差。
+        const double tolerance=result.coordinateUnit=="m"?3.0:result.coordinateUnit=="ft"?9.84252:Missing;
+        if(std::isfinite(tolerance)&&std::isfinite(result.fitMaxResidual)&&result.fitMaxResidual>tolerance)
+            result.warnings.push_back("道头坐标最大拟合残差"+std::to_string(result.fitMaxResidual)+"，超过"+result.coordinateUnit+"坐标下的定位容差"+std::to_string(tolerance)+"：范围仅供概览，精确定位需更高精度的道头几何。");
+        return true;
+    }catch(const std::exception& e){return reject(error,std::string("地震坐标范围读取失败：")+e.what());}
+}
 bool DataService::readSeismicTrace(long long volumeId,long long traceIndex,const SeismicTraceReadOptions& options,SeismicTraceResult& result,std::string& error,const CancelCheck& cancel){
     result={};error.clear();try{
         if(stopped(cancel,error))return false;

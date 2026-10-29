@@ -39,6 +39,9 @@ public:
                         SeismicReadStatistics& statistics, std::string& error, const Cancel& cancel = {});
     bool hasCoordinateMap() const;
     double maxCoordinateResidual() const;
+    // 拟合统计：参与拟合的道头数与RMS残差（坐标单位）。未拟合时为 0 / NaN。
+    int coordinateSampleCount() const;
+    double coordinateRmsResidual() const;
     bool mapXY(double x, double y, double& il, double& xl) const;
     bool mapLine(double il, double xl, double& x, double& y) const;
     bool covers(double x, double y) const;

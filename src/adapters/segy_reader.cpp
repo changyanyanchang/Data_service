@@ -465,6 +465,8 @@ bool Reader::readTraceBatch(const std::vector<long long>& ordinals,int first,int
 }
 bool Reader::hasCoordinateMap() const {return impl_->mapper.valid();}
 double Reader::maxCoordinateResidual() const {return impl_->mapper.fit().maxResidual;}
+int Reader::coordinateSampleCount() const {return impl_->mapper.fit().sampleCount;}
+double Reader::coordinateRmsResidual() const {return impl_->mapper.fit().rmsResidual;}
 bool Reader::mapXY(double x,double y,double& il,double& xl)const{return impl_->mapper.MapXY(x,y,il,xl);}
 bool Reader::mapLine(double il,double xl,double& x,double& y)const{return impl_->mapper.MapInlineXline(il,xl,x,y);}
 bool Reader::covers(double x,double y) const {
