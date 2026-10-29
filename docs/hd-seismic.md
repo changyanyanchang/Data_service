@@ -66,6 +66,69 @@ bool ok = service.extractSection(request, options, wall, error);
 
 完整、可编译的三个调用场景见 [案例 10](../examples/getting_started/10_hd_seismic/main.cpp)。它接受工区、地震体编号以及实际测线号、时间或多个 XY 参数。
 
+## 测区平面坐标范围
+
+要把地震体放到地图上、裁剪其它资料或判断某个 XY 是否落在测区内，用 `readSeismicCoordinateRange`。它在一次调用里给出测线号域、四个角点和包围盒，省去宿主自己解析道头、拟合测网仿射。
+
+```cpp
+SeismicCoordinateRange range;
+bool ok = service.readSeismicCoordinateRange(volumeId, range, error);
+// ok 只表示调用完成。范围本身可能不可得，先看 status：
+//   complete          号域与四角点齐全
+//   xy-unavailable    缺可验证的平面XY或拟合失败，只有号域
+//   grid-unavailable  规则测线网格未确认，号域也不给出
+if (ok && range.status == "complete" && range.coordinateUnit == "m") {
+    // range.minX/minY/maxX/maxY：四角点包围盒，单位同 coordinateUnit
+    // range.corners：顺序固定 (ilMin,xlMin) (ilMin,xlMax) (ilMax,xlMax) (ilMax,xlMin)
+}
+```
+
+| 字段 | 用途 |
+|---|---|
+| `inlineMin/Max/Step/Count`、`crosslineMin/Max/Step/Count` | 实际测线号域；稀疏或跳号测网按真实值给出，不是数组下标 |
+| `corners` | 四个角点的测线与平面坐标；`tracePresent=false` 表示该角点没有实际道，坐标由仿射给出 |
+| `minX/minY/maxX/maxY` | 角点包围盒；`complete` 之外一律为 Missing（NaN），不用 0 顶替 |
+| `coordinateSystem`、`coordinateUnit` | 透传地震体已确认的约定；空字符串表示尚未确认 |
+| `geometryStatus` | `sampled-regular`（有界抽查）/ `full-header-index`（全文件道头索引） |
+| `affineValid`、`fitHeaderSamples`、`fitRmsResidual`、`fitMaxResidual` | 采样道头拟合的精度依据；残差过大时范围只作概览 |
+| `warnings` | 人读说明：抽查范围、单位未确认、角点缺道、残差超容差等 |
+
+范围只覆盖已确认存在的测线格点：不填补缺道、不外推到测网之外、不做投影换算、不换算单位。角点是仿射取值，不等于该处实测道的坐标；需要逐点精度时用 `readSeismicTrace` 核对实际道头。`coordinateUnitsCode` 不是长度单位（非 0/1）时 XY 可能不是平面长度，此时 `warnings` 会明确指出。
+
+## 工区平面范围（井点 ∪ 地震）
+
+工区范围由两块最小外接矩形合并而成：全部井口点、全部地震体范围。`readProjectPlanarRange` 一次给出两块矩形和合并结果。
+
+```cpp
+ProjectPlanarRange area;
+bool ok = service.readProjectPlanarRange(area, error);
+// 两块矩形各自可用，合并结果单独判断：
+// area.wells   井口点 MBR
+// area.seismic 地震体范围并集
+// area.merged  工区范围；status != complete/partial 时 valid=false
+if (ok && area.merged.valid) {
+    // area.merged.minX/minY/maxX/maxY：工区范围
+}
+```
+
+| status | 含义 |
+|---|---|
+| `complete` | 井点与地震两块都在，坐标系/单位已确认且一致，`merged` 是两者并集 |
+| `partial` | 只有一块可得，`merged` 就是那一块（warnings 说明缺哪块） |
+| `unavailable` | 两块都不可得，`merged.valid=false` |
+| `conventions-unconfirmed` | 两块都在，但至少一侧坐标系/单位为空，不合并 |
+| `conventions-mismatch` | 两侧声明不同，或同一侧内部出现多种声明，不合并 |
+
+合并纪律：
+
+- 缺井口坐标的井计数进 `wellsWithoutCoordinates`，不按 0 或井名补位；
+- 没有可验证 XY 的地震体记入 `volumesWithoutRange`，不参与并集，也不会把工区范围缩成假值；
+- 单个体读取失败只记录并继续，不中断整次查询；取消则整体中止；
+- 声明冲突时清空该块矩形四项（全部 Missing），不留下半可信数值；
+- 不做单位换算与投影：`m` 与 `ft` 混用、两个不同工程坐标系混用一律判为 mismatch，由调用方先确认约定再谈转换。
+
+井点 MBR 与地震范围若需要按投影后的统一坐标系合并，应先在业务侧完成转换、写回已确认的坐标系与单位，再调用本接口；本接口不猜测转换参数。
+
 ## 内存和速度边界
 
 单次最多 6400 万个振幅，float 数组约 256 MB，坐标数组、图像以及处理副本还会增加内存。这个数字是振幅数量保护，不是进程总内存硬上限。原始地震体始终外部引用、只读，不全体加载或复制。

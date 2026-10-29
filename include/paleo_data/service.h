@@ -17,6 +17,31 @@ struct WellSummary {
     int corePhotos=0, attachments=0, markerTracks=0;
 };
 struct WellInfoRecord { long long id=0; WellInfo value; };
+// 平面轴对齐最小外接矩形。四个值同时有效或同时为 Missing，不用 0 表示未知。
+// coordinateSystem/Unit 是来源声明，这里不换算单位、不做投影。
+struct PlanarExtent {
+    double minX=Missing, minY=Missing, maxX=Missing, maxY=Missing;
+    std::string coordinateSystem; // 参与求包围的来源声明；空表示未确认
+    std::string coordinateUnit;   // 如 m、ft；空表示未确认
+    long long pointCount=0;       // 参与求包围的点数（井数或地震体角点数）
+    bool valid=false;             // 四项坐标均有限时为 true；false 时四项均为 Missing
+};
+
+// 工区平面范围 = 全部井口点矩形 ∪ 全部地震体范围矩形。
+// 只有两块都在、且坐标约定已确认并一致时才合并；否则 merged.valid=false 并说明原因，
+// 绝不把不同坐标系或单位的数值凑进同一个矩形。单一来源存在时按 partial 给出该块矩形。
+// status：complete / partial（只有一块）/ unavailable（两块都没有）/
+//         conventions-unconfirmed（两块都在但约定未确认）/ conventions-mismatch（声明冲突）。
+struct ProjectPlanarRange {
+    PlanarExtent wells;     // 有井口坐标的井
+    PlanarExtent seismic;   // 可换算地震体的并集
+    PlanarExtent merged;    // 工区范围；不可合并时 valid=false
+    int wellCount=0, wellsWithCoordinates=0, wellsWithoutCoordinates=0;
+    int volumeCount=0, volumesWithRange=0;
+    std::vector<long long> volumesWithoutRange; // 未参与范围的地震体编号，顺序同资料登记
+    std::string status;
+    std::vector<std::string> warnings; // 缺坐标井数、被跳过体及原因、未合并原因等
+};
 // 一条资料的“索引卡片”，用于选择要读取哪条资料，不携带全部采样值。
 // 拿到 id 后，调用 readCurveSlice / readIntervals / readTimeDepth 等读取实际数据。
 struct DataEntry {
@@ -321,6 +346,21 @@ public:
     bool readSection(long long id, SeismicSection& result, std::string& error) const;
     // 快速核验外部SEG-Y。仅返回文件事实，不替用户确认CRS、TWT或时间基准。
     bool inspectSeismic(long long volumeId, SeismicFileInfo& result, std::string& error, const CancelCheck& cancelled={});
+    // 测区平面坐标范围（四角点+包围盒）。volumeId 取 listData("volumes") 的编号，
+    // 与 inspectSeismic/readSeismicLine 同一来源校验。返回 true 只表示调用成功：
+    // 范围不可得属于文件事实，读 status 与 warnings，不要用 0 代替 Missing。
+    // 角点坐标为抽样道头拟合值，按 fitRmsResidual/fitMaxResidual 判断可用精度；
+    // 不自动投影、不换算单位、不外推缺道。cancelled 在打开与换算阶段协作生效。
+    bool readSeismicCoordinateRange(long long volumeId, SeismicCoordinateRange& result,
+                                    std::string& error, const CancelCheck& cancelled={}) const;
+    // 工区平面范围：井口点最小外接矩形 ∪ 全部地震体范围矩形。
+    // 井口取 listWellInfos 的实际坐标；缺坐标的井计数上报，不按 0 或井名补位。
+    // 地震体逐个取 readSeismicCoordinateRange，给出范围的体参与并集；其余记入
+    // volumesWithoutRange 与 warnings，不因单个体不可读而让整次调用失败。
+    // 合并前要求两侧坐标系与单位已声明且一致；未声明或冲突时 merged 留空，
+    // 由调用方决定先确认约定还是先做转换。返回 true 只表示查询完成。
+    bool readProjectPlanarRange(ProjectPlanarRange& result, std::string& error,
+                                const CancelCheck& cancelled={}) const;
     // 按文件位置读取单道，既不要求已知CRS，也不要求规则三维网格。
     bool readSeismicTrace(long long volumeId, long long traceIndex, const SeismicTraceReadOptions& options,
                           SeismicTraceResult& result, std::string& error, const CancelCheck& cancelled={});
