@@ -13,3 +13,10 @@
 Qt、zlib 和 FreeXL 所需的 libiconv 由开发或运行环境提供，未将其安装目录、二进制库或工具链提交到 Git。
 
 为满足“仓库只存代码”的要求，FreeXL 上游随附的电子表格、图片和原始压缩包未提交。解析库源码、构建文件、补丁及授权声明均予以保留。项目自己的回归测试在临时目录中由代码生成小型合成输入，不依赖真实井资料或地震体。
+# Embedding patch
+
+The copied `vendor/paleo_io/ziparchive.{h,cpp}` implementation retains its source
+and license notices. Its namespace is changed to `paleo::data::zip` to avoid
+colliding with the host workstation's separately maintained ZIP implementation.
+When embedded, a host can supply its compatible seismic engine target and headers
+instead of linking two copies. See `docs/workstation-embedding.md`.

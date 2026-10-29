@@ -54,6 +54,9 @@ int main(int argc,char** argv){
         check(p.sourceTables[0].rowCount==4&&p.sourceTables[0].columnCount==7,"physical sparse row/column");
         check(has(p,"NON_NUMERIC_CURVE")&&has(p,"DEPTH_UNIT_UNKNOWN"),"data review issues");check(p.declaredNullValues.empty(),"no invented NULL declaration");
         check(set.depthInfo.depthUnit.empty()&&set.depthInfo.depthType.empty()&&set.logCurves[0].curveUnit.empty(),"unknown conventions stay empty");
+        ParseOptions confirmed;confirmed.comprehensiveWellMetreDepth=true;
+        const auto declared=parse(path,confirmed);
+        check(declared.wells[0].wellbore.logSets[0].depthInfo.depthUnit=="m"&&declared.wells[0].wellbore.logSets[0].depthInfo.depthType=="MD","explicit host comprehensive-export contract");
         check(w.wellbore.intervalTracks.size()==3&&w.wellbore.intervalTracks[0].trackType=="沉积相","text facies maps to interval model");
         check(w.wellbore.intervalTracks[0].intervals[0].intervalName=="分流河道"&&w.wellbore.intervalTracks[0].sourceSheet=="文本道","Chinese value and provenance");
         check(w.wellbore.intervalTracks[1].intervals[0].bottomNotPenetrated==1&&w.wellbore.intervalTracks[1].intervals[0].topUnconformity==0,"formation flags");

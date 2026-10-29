@@ -34,7 +34,8 @@ int main(int argc,char** argv){QCoreApplication app(argc,argv);try{
     const auto png=QByteArray::fromBase64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jQ4kAAAAASUVORK5CYII=");
     const auto photo=write(temp.path(),"岩心/XJ88-8-B1/照片/1-4.png",png);check(service.importFile(u(photo),{},report,error),error.c_str());
     check(service.listData("core_photos",0,entries,error)&&entries.size()==1,"core photo category persisted");CorePhotoTrack track;const auto photoId=entries[0].id,photoSource=entries[0].sourceId;
-    check(service.readCorePhotoTrack(photoId,track,error)&&track.photos.size()==1,"typed photo array");check(std::isnan(track.photos[0].topDepth)&&QString::fromUtf8(track.photos[0].imagePath).startsWith(project),"box number not depth; managed relative path resolved");
+    check(service.readCorePhotoTrack(photoId,track,error)&&track.photos.size()==1,"typed photo array");
+    check(std::isnan(track.photos[0].topDepth),"box number not depth");check(QString::fromUtf8(track.photos[0].imagePath).startsWith(project),"managed relative path resolved");
     const auto relocated=write(temp.path(),"relocated/image.png",png);check(service.relocateSource(photoSource,u(relocated),error),error.c_str());check(service.readCorePhotoTrack(photoId,track,error)&&track.photos[0].imagePath==u(relocated),"relocate rewrites typed photo path");
     DataTable table;check(service.readTable("core_photos",photoId,0,200,table,error)&&table.totalRows==1&&table.columns.size()==5,"photo table usable");
     const auto attachment=write(temp.path(),"岩心/XJ88-8-B1/报告.pdf","PDF placeholder for metadata registration");check(service.importFile(u(attachment),{},report,error),error.c_str());check(service.listData("attachments",0,entries,error)&&entries.size()==1&&entries[0].count==1,"attachment count");Attachment a;check(service.readAttachment(entries[0].id,a,error)&&QFileInfo::exists(QString::fromUtf8(a.filePath)),"attachment returned");

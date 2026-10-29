@@ -43,7 +43,7 @@ Windows 也可在 MSVC x64 开发终端运行 `build.ps1`，通过 `-QtRoot`、`
 
 旧式 `.xls` 读取动态使用 FreeXL。维护的源码在 `vendor/freexl`，Windows 构建说明见其 `NOTICE.txt` 和构建脚本；运行时还需对应的 libiconv 库。`.xlsx` 使用本项目的 ZIP/XML 解析器。这里给出标准 CMake 构建方法，不宣称所有系统或工具链均已验证。
 
-当前源码已在 Windows x64 Release 环境独立构建：17 项合成回归测试通过，安装后的 SDK 可编译全部十一个入门案例。验证过程不依赖随仓库发布的数据文件。
+源码可在 Windows x64 Release 环境独立构建并运行合成回归测试；安装后的 SDK 可编译全部十一个入门案例。验证过程不依赖随仓库发布的数据文件。
 
 ## 不带真实资料的演示
 
@@ -88,6 +88,8 @@ if (service.readCurveSlice(curveId, paleo::data::Missing,
 `listData` 返回可供选择的资料卡片，`readCurveSlice` 等方法返回实际数据对象。JSON 是可选的导出形式，不是 C++ 调用的必经步骤。每个调用线程使用自己的 `DataService` 实例，不跨线程共享同一实例。
 
 ## 阅读顺序
+
+- [宿主嵌入、资产版本目录与只读会话](docs/workstation-embedding.md)
 
 - [接口与界面演示](docs/api-demo.md)
 - [怎样读懂一次 C++ 调用](docs/cpp-reading-guide.md)

@@ -16,7 +16,7 @@
 #include <cstring>
 
 // 层：数据
-namespace paleo::io
+namespace paleo::data::zip
 {
 namespace
 {
@@ -664,4 +664,4 @@ bool zipWriteArchive( const QString &path, const QVector<ZipWriteEntry> &entries
   return true;
 }
 
-} // namespace paleo::io
+} // namespace paleo::data::zip

@@ -171,6 +171,13 @@ ParsedFile parseSpreadsheetXmlFile(const std::string& path,const ParseOptions& o
         if(sh.kind=="logs"){
             if(!sh.logSets.contains(wi)){LogSet set;set.logSetName=s(sh.name);set.sourceFile=path;set.sourceSheet=s(sh.name);set.depthInfo.depthUnit=options.depthUnit;
                 if(headerName(sh.header[sh.depth])=="MD")set.depthInfo.depthType="MD";
+                // Confirmed comprehensive-well export contract, shared with the host:
+                // exact leading headers + named curve worksheet declare MD in metres.
+                // Other generic DEPTH/深度 tables retain unknown conventions.
+                const bool comprehensive=options.comprehensiveWellMetreDepth&&(sh.name.startsWith(QStringLiteral("测井曲线"))||sh.name.startsWith(QStringLiteral("离散曲线")))
+                    &&sh.header.size()>=4&&headerName(sh.header[0])==QStringLiteral("井号")
+                    &&headerName(sh.header[1])==QStringLiteral("深度")&&headerName(sh.header[2])=="TVD"&&headerName(sh.header[3])=="TVDSS";
+                if(comprehensive){set.depthInfo.depthType="MD";if(set.depthInfo.depthUnit.empty())set.depthInfo.depthUnit="m";}
                 for(int c:sh.curves){LogCurve curve;curve.curveName=s(sh.header[c]);curve.description=s(sh.header[c]);set.logCurves.push_back(std::move(curve));}
                 sh.logSets[wi]=int(w.wellbore.logSets.size());w.wellbore.logSets.push_back(std::move(set));}
             auto& set=w.wellbore.logSets[sh.logSets[wi]];auto& axis=set.samplingAxis;const double depth=number(cell(row,sh.depth));
@@ -190,7 +197,16 @@ ParsedFile parseSpreadsheetXmlFile(const std::string& path,const ParseOptions& o
             w.wellbore.corePhotoTracks[sh.photoTracks[key]].photos.push_back(std::move(p));++photos;return;
         }
         if(!sh.tracks.contains(key)){IntervalTrack t;t.trackName=s(trackName);t.trackType=s(sh.kind);if(sh.kind==QStringLiteral("文本")&&trackName.contains(QStringLiteral("相")))t.trackType="沉积相";if(sh.kind==QStringLiteral("符号")&&cell(row,sh.nameCol).contains(QStringLiteral("旋回")))t.trackType="旋回";t.sourceFile=path;t.sourceSheet=s(sh.name);t.depthInfo.depthUnit=options.depthUnit;sh.tracks[key]=int(w.wellbore.intervalTracks.size());w.wellbore.intervalTracks.push_back(std::move(t));}
-        auto& track=w.wellbore.intervalTracks[sh.tracks[key]];GeologicalInterval interval;interval.intervalName=s(cell(row,sh.nameCol));interval.displayOrder=int(track.intervals.size());interval.sourceRow=sh.row;
+        auto& track=w.wellbore.intervalTracks[sh.tracks[key]];
+        // The host explicitly confirms this comprehensive export's MD/metre
+        // convention; generic interval spreadsheets retain unknown conventions.
+        if(options.comprehensiveWellMetreDepth && sh.header.size()>=3 &&
+           headerName(sh.header[0])==QStringLiteral("井号") &&
+           headerName(sh.header[1])==QStringLiteral("顶深") && headerName(sh.header[2])==QStringLiteral("底深")) {
+            track.depthInfo.depthType="MD";
+            if(track.depthInfo.depthUnit.empty())track.depthInfo.depthUnit="m";
+        }
+        GeologicalInterval interval;interval.intervalName=s(cell(row,sh.nameCol));interval.displayOrder=int(track.intervals.size());interval.sourceRow=sh.row;
         interval.topDepth=number(cell(row,sh.top));interval.bottomDepth=number(cell(row,sh.bottom));interval.topTvd=number(cell(row,sh.topTvd));interval.bottomTvd=number(cell(row,sh.bottomTvd));interval.topTvdss=number(cell(row,sh.topSs));interval.bottomTvdss=number(cell(row,sh.bottomSs));
         interval.faciesType=s(cell(row,sh.facies));interval.topUnconformity=flag(cell(row,sh.topUnc));interval.bottomUnconformity=flag(cell(row,sh.bottomUnc));interval.bottomNotPenetrated=flag(cell(row,sh.notPen));
         if(!std::isfinite(interval.topDepth)||!std::isfinite(interval.bottomDepth)||interval.bottomDepth<interval.topDepth)issue(out,"INTERVAL_DEPTH_INVALID","层段顶底深缺失或顺序异常；原值保留",sh.name,sh.row,false,row.join(','));

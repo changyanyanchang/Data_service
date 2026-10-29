@@ -20,6 +20,7 @@ struct ParseOptions {
     // 服务重导入副本时自动填写原始身份路径，仅供井名/目录语义和相对附件定位。
     // 文件内容仍从 parseFile(path, ...) 的 path 读取；普通调用者可留空。
     std::string sourceContextPath;
+    bool comprehensiveWellMetreDepth=false; // Host-confirmed exporter contract; generic tables remain unknown.
 };
 struct ParseIssue {
     std::string code, message, sheet, originalText;
@@ -35,10 +36,14 @@ struct SourceTable {
     int rowCount = 0, columnCount = 0;
     std::vector<SourceCell> cells; // sparse, preserves original row/column and headers
 };
+struct CoordinateSystemDeclaration {
+    std::string coordinateSystem, coordinateUnit;
+};
 struct ParsedFile {
     std::string path, kind, status; // parsed / review / registered / ignored / failed
     std::string message, documentText;
     std::vector<double> declaredNullValues; // 文件明确声明的空值；优先于默认及配置空值
+    std::vector<CoordinateSystemDeclaration> coordinateSystems; // Explicit source declarations only; never inferred from numeric ranges.
     std::vector<WellDataset> wells;
     std::vector<TimeDepthTable> unassignedTimeDepth; // 已解析但井名未确认，保留完整数值，不创建占位井
     std::vector<SeismicHorizon> horizons;

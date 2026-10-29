@@ -20,6 +20,7 @@
 #endif
 
 namespace paleo::data {
+bool mapWellCoordinateTables(ParsedFile&,const ParseOptions&,const CancelCheck&);
 namespace {
 std::string s(const QString& value) { return value.toUtf8().toStdString(); }
 QString q(const std::string& value) { return QString::fromUtf8(value); }
@@ -202,6 +203,7 @@ ParsedFile parseCsv(ParsedFile out,QTextStream& input,const ParseOptions& option
             if(table.cells.size()>2000000)return fail(std::move(out),"未映射文本表超过 200 万非空格预算，请分表导入");
         }
         out.sourceTables.push_back(std::move(table));out.status="review";out.message="已保存文本表全部原始单元格，业务字段映射待核对";
+        if(mapWellCoordinateTables(out,options,cancelled))return out;
         addIssue(out,"TEXT_MAPPING_REQUIRED","表头不属于已确认模板；MD/TVD/X/Y 轨迹坐标表不会伪造井斜角或误当测井曲线",header.row,false,header.cells.join(separator));return out;
     }
     const QString fileWell=wellToken(QFileInfo(q(out.path)).completeBaseName());

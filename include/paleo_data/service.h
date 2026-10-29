@@ -1,6 +1,7 @@
 #pragma once
 #include "parser.h"
 #include "seismic.h"
+#include "graph.h"
 #include <memory>
 #include <cstdint>
 
@@ -15,6 +16,7 @@ struct WellSummary {
     bool hasCoordinates=false;
     int corePhotos=0, attachments=0, markerTracks=0;
 };
+struct WellInfoRecord { long long id=0; WellInfo value; };
 // 一条资料的“索引卡片”，用于选择要读取哪条资料，不携带全部采样值。
 // 拿到 id 后，调用 readCurveSlice / readIntervals / readTimeDepth 等读取实际数据。
 struct DataEntry {
@@ -28,6 +30,13 @@ struct DataEntry {
     long long count=0;         // 该类别的记录数，例如曲线样点数或本道层段数。
 };
 struct SourceEntry { long long id=0; std::string path, kind, status, message; long long bytes=0; };
+// Complete stored identity for index projections; separate from the original lightweight list contract.
+struct SourceIndexEntry {
+    long long id=0;
+    std::string path, storedPath, kind, status, message;
+    long long bytes=0;
+    std::string sha256;
+};
 struct IssueEntry { long long id=0, sourceId=0; std::string code, message, originalText, sheet, resolution; int row=0; bool blocking=false, resolved=false; };
 // 通用的分页展示表。rows 是本页内容，totalRows 是总行数；表格值统一为文字。
 // 算法计算优先使用下方带 double/vector 字段的专用结果对象。
@@ -73,6 +82,38 @@ struct WellFeatureTable {
     std::vector<FeatureColumn> columns;
 };
 struct IntervalTrackResult { long long trackId=0,wellId=0; std::string name; DepthInfo depthInfo; std::vector<IntervalRecord> intervals; };
+// Plot input keeps groups, source IDs and conventions separate. No file reparse,
+// interpolation, implicit CRS inheritance or coordinate transformation is performed.
+struct ProjectCoordinates { std::string coordinateSystem, coordinateUnit; };
+struct ProjectCrsCandidate {
+    long long sourceId=0, objectId=0;
+    std::string objectKind; // well, volume, horizon, map, or source-level spatial metadata.
+    std::string sourcePath, coordinateSystem, coordinateUnit;
+};
+struct ProjectCrsInfo {
+    std::string coordinateSystem, coordinateUnit;
+    std::string selectionBasis; // manual, import, or empty when no project CRS is selected.
+    bool hasConflict=false;
+    std::vector<ProjectCrsCandidate> candidates;
+};
+struct WellPlotLog { DataEntry entry; LogSet value; };
+struct WellPlotIntervals { DataEntry entry; IntervalTrack value; };
+struct WellPlotMarkers { DataEntry entry; MarkerTrack value; };
+struct WellPlotPhotos { DataEntry entry; CorePhotoTrack value; };
+struct WellPlotData {
+    long long wellId=0;
+    WellInfo well;
+    ProjectCoordinates projectCoordinates;
+    DepthInfo defaultDepthInfo;
+    std::vector<WellPlotLog> logs;
+    std::vector<WellPlotIntervals> intervals;
+    std::vector<WellPlotMarkers> markers;
+    std::vector<WellPlotPhotos> photos;
+};
+struct WellPlotOptions {
+    bool processed=true;
+    long long maxValues=8000000; // Preflight sample/interval budget, 1..64000000.
+};
 struct ImportOptions {
     ParseOptions parsing;
     bool copySources=true;
@@ -83,9 +124,11 @@ struct ImportOptions {
     bool verifyUnchangedFiles=false;
     int parserThreads=2; // 目录导入的校验/解析线程数，限制为1–4；1用于串行运行。
     // 待解析/待发布任务的估计内存预算；不是进程内存硬上限。
-    // >=32MiB的表格等可展开资料单独准备；仅登记的照片/归档文件仍可并行校验。
+    // >=32MiB的压缩表格/未知大文件单独准备；XML/LAS按流式展开估算，可在预算内并行。
+    // 仅登记的照片/归档文件仍可并行校验。
     // 入库始终按文件顺序执行。
     long long maxPendingBytes=256LL*1024*1024;
+    std::vector<std::string> excludedDirectories; // Explicit output/staging trees pruned before directory traversal.
 };
 struct ImportProgress { int completed=0, total=0; std::string file, status; };
 struct ImportReport {
@@ -172,19 +215,53 @@ public:
     bool createProject(const std::string& directory, const std::string& name, std::string& error);
     // directory 是包含 data.sqlite 的工区文件夹；路径字符串使用 UTF-8。
     bool openProject(const std::string& directory, std::string& error);
+    // Read existing data only: no schema upgrades, imports or edits. A separate
+    // instance is required for each worker thread, as for writable sessions.
+    bool openProjectReadOnly(const std::string& directory, std::string& error);
+    bool isReadOnly() const;
+    // Consistent SQLite snapshot including committed WAL; destination must not exist.
+    // Copies the database only; external source references retain their meaning.
+    bool snapshotDatabase(const std::string& destination, std::string& error) const;
     void closeProject();
     std::string projectPath() const;
     std::string projectName() const;
+    std::string projectCrs() const;
+    std::string projectCrsUnit() const;
+    bool setProjectCrs(const std::string& epsg, const std::string& unit, std::string& e);
+    bool readProjectCoordinates(ProjectCoordinates& result, std::string& error) const;
+    // Current selection plus explicit import candidates and conflicts. No CRS inference or transformation.
+    bool readProjectCrsInfo(ProjectCrsInfo& result, std::string& error) const;
+    // Only explicit stored business-object relations; no name/folder inference.
+    bool listSourceWells(long long sourceId, std::vector<long long>& result, std::string& error) const;
+    // One SQLite read snapshot. Read-only sessions supported; output remains empty
+    // on failure/cancellation. All sources belonging to this stable well ID are read.
+    bool readWellPlotData(long long wellId, const WellPlotOptions& options,
+                          WellPlotData& result, std::string& error,
+                          const CancelCheck& cancelled={}) const;
     bool importDirectory(const std::string& directory, const ImportOptions& options, ImportReport& result, std::string& error, const ProgressCallback& progress={}, const CancelCheck& cancelled={});
     bool importFile(const std::string& path, const ImportOptions& options, ImportReport& result, std::string& error, const CancelCheck& cancelled={});
+    // Persist a host-prepared, normalized model without reparsing or copying.
+    // expectedSha256 binds it to readablePath; storedReference is interpreted
+    // relative to this data project after its enclosing directory is published.
+    // The caller owns parsing correctness and publication of that directory.
+    // Unresolved blocking issues reject the entire batch; failure leaves sourceId=0.
+    // Nonblocking issues are committed with source status "review".
+    bool importPreparedFile(const std::string& readablePath, const std::string& identityPath,
+                            const std::string& storedReference, const std::string& expectedSha256,
+                            const ParsedFile& model, long long& sourceId, std::string& error,
+                            const CancelCheck& cancelled={});
     bool listWells(std::vector<WellSummary>& result, std::string& error) const;
     bool readWellInfo(long long wellId, WellInfo& result, std::string& error) const;
+    // Basic fields only: one query, no per-well counts or payload decoding.
+    bool listWellInfos(std::vector<WellInfoRecord>& result, std::string& error) const;
     bool saveWellInfo(long long wellId, const WellInfo& value, std::string& error);
     bool createWell(const WellInfo& value, long long& wellId, std::string& error);
     // 先列出资料卡片，供选择ID。wellId=0 表示不按井过滤，也包含待归井资料。
     // kind: curves曲线、intervals分层道、samples样品表、time_depth时深、trajectories测斜，
     // 或 markers、core_photos、attachments、horizons、maps、volumes、sections、tables。
     bool listData(const std::string& kind, long long wellId, std::vector<DataEntry>& result, std::string& error) const;
+    // Filter in SQLite, without listing every other source in the work area.
+    bool listSourceData(const std::string& kind, long long sourceId, std::vector<DataEntry>& result, std::string& error) const;
     bool readTable(const std::string& kind, long long id, long long offset, int limit, DataTable& result, std::string& error) const;
     // 真正读取曲线数组。范围含端点；topDepth/bottomDepth 为 Missing 时不限制相应端。
     // processed=true 读取处理值，false 读取原值；两种模式都返回 rawValues 与 quality。
@@ -208,6 +285,17 @@ public:
     bool saveInterval(long long trackId, IntervalRecord& interval, std::string& error);
     bool deleteData(const std::string& kind, long long id, std::string& error); // DB records only; external files never deleted
     bool listSources(std::vector<SourceEntry>& result, std::string& error) const;
+    bool listSourceIndexEntries(std::vector<SourceIndexEntry>& result, std::string& error) const;
+    // Relations are directed from sourceId to targetSourceId. Repeating the same
+    // relation updates its note and returns the existing stable relation ID.
+    bool relateSources(long long sourceId, long long targetSourceId, const std::string& relation,
+                       const std::string& note, long long& relationId, std::string& error);
+    bool removeSourceRelation(long long relationId, std::string& error);
+    bool listSourceRelations(std::vector<SourceRelation>& result, std::string& error) const;
+    // Build on demand from registered files and explicit stored/manual relations.
+    // No filename/folder inference, file reparse, layout or rendering is performed.
+    bool buildFileGraph(const FileGraphOptions& options, FileGraph& result, std::string& error,
+                        const CancelCheck& cancelled={}) const;
     bool listIssues(bool unresolvedOnly, std::vector<IssueEntry>& result, std::string& error) const;
     bool resolveIssue(long long issueId, const std::string& resolution, std::string& error);
     bool reimportSource(long long sourceId, const ParseOptions& correctedMapping, ImportReport& result, std::string& error, const CancelCheck& cancelled={});

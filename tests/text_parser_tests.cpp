@@ -13,7 +13,10 @@
 
 using namespace paleo::data;
 #ifdef PALEO_TEXT_TEST_STUB
-namespace paleo::data { ParsedFile parseAuxiliaryFile(const std::string& path,const ParseOptions&,const CancelCheck&) { ParsedFile p;p.path=path;p.status="registered";return p; } }
+namespace paleo::data {
+ParsedFile parseAuxiliaryFile(const std::string& path,const ParseOptions&,const CancelCheck&) { ParsedFile p;p.path=path;p.status="registered";return p; }
+bool mapWellCoordinateTables(ParsedFile&,const ParseOptions&,const CancelCheck&) {return false;}
+}
 #endif
 void check(bool value,const char* message) { if(!value) throw std::runtime_error(message); }
 std::string utf8(const QString& text) {return text.toUtf8().toStdString();}
@@ -42,6 +45,15 @@ int main(int argc,char** argv) {
         p=parseFile(utf8(coordPath));check(p.wells.size()==1&&std::isnan(p.wells[0].wellInfo.wellheadX),"unknown coordinate withheld");check(p.sourceTables[0].cells.size()==3,"raw coordinate kept");
         mapping={};mapping.coordinateOrder="yx";mapping.coordinateSystem="TEST_CRS";mapping.coordinateUnit="m";
         p=parseFile(utf8(coordPath),mapping);check(p.wells[0].wellInfo.wellheadX==300000&&p.wells[0].wellInfo.wellheadY==2000000,"explicit axes honored");
+#ifndef PALEO_TEXT_TEST_STUB
+        const auto labelled=write(temp.path(),"coordinate-table.csv",QByteArray("井号,X（纵坐标）,Y（横坐标）\nSYNTH-1,2360000,300000\nSYNTH-2,2361000,0\nTOTAL,,\n"));
+        p=parseFile(labelled);check(p.kind=="coordinates"&&p.wells.size()==2,"labelled coordinate table produces only actual wells");
+        check(p.wells[0].wellInfo.wellheadX==300000&&p.wells[0].wellInfo.wellheadY==2360000,"semantic horizontal/vertical labels override X/Y prefixes");
+        check(p.wells[1].wellInfo.wellheadX==0&&p.wells[0].wellInfo.coordinateSystem.empty()&&p.wells[0].wellInfo.coordinateUnit.empty(),"zero is valid and conventions remain unknown");
+        p=parseFile(labelled,mapping);check(p.wells[0].wellInfo.coordinateSystem=="TEST_CRS"&&p.wells[0].wellInfo.coordinateUnit=="m","explicit coordinate reference preserved");
+        const auto duplicate=write(temp.path(),"duplicate-coordinates.csv","WELL,X,Y\nSYNTH-1,100,200\nSYNTH-1,101,201\n");
+        p=parseFile(duplicate);check(p.wells.size()==1&&std::isnan(p.wells[0].wellInfo.wellheadX)&&has(p,"coordinate_row_invalid"),"duplicate coordinates do not choose a location");
+#endif
         const auto horizon=write(temp.path(),"t70.dat",QByteArray("INLINE : 10 XLINE : 20 1000.25 2000.50 100.25\nINVALID\nINLINE: 10 XLINE: 21 1001.25 2001.50 101.50\n"));
         p=parseFile(horizon);check(p.horizons.size()==1&&p.horizons[0].points.size()==2,"horizon shape");check(p.horizons[0].points[0].zTime==100.25&&p.horizons[0].timeUnit.empty(),"horizon time preserved");check(has(p,"HORIZON_BAD_ROW"),"horizon reject visible");
         const auto empty=write(temp.path(),"empty.sgy",{});p=parseFile(empty);check(p.status=="failed"&&p.volumes.empty(),"empty SEG-Y rejected");

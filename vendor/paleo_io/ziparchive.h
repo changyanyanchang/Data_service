@@ -21,7 +21,7 @@
 // field 0x0001 + EOCD64/locator），forceZip64 可强制小包走 ZIP64 结构；读面
 // 同步扩到 ZIP64（条目级预算闸不变——单包仍 ≤ 512 MiB，>4 GiB 条目解不出）。
 // 层：数据
-namespace paleo::io
+namespace paleo::data::zip
 {
 
 struct ZipEntry
@@ -91,4 +91,4 @@ QByteArray zipBuildArchive( const QVector<ZipWriteEntry> &entries, const ZipBuil
 bool zipWriteArchive( const QString &path, const QVector<ZipWriteEntry> &entries,
                       const ZipBuildOptions &options, QString *error, bool *zip64Used = nullptr );
 
-} // namespace paleo::io
+} // namespace paleo::data::zip

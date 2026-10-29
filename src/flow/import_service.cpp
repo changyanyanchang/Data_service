@@ -53,7 +53,11 @@ static bool scanSignature(const QString& path,QString& signature,const CancelChe
 }
 static QString optionsJson(const ParseOptions& o){
     QJsonArray rules;for(auto& r:o.cleaningRules){QJsonArray nulls;for(double n:r.nullValues)nulls.append(n);rules.append(QJsonObject{{"curve",q(r.curveType)},{"unit",q(r.unit)},{"nulls",nulls},{"checkMin",r.checkMinimum},{"min",r.minimum},{"checkMax",r.checkMaximum},{"max",r.maximum},{"replace",r.replaceInvalidWithMissing}});}
-    return json(QJsonObject{{"parser_version",2},{"well",q(o.wellNameOverride)},{"crs",q(o.coordinateSystem)},{"unit",q(o.coordinateUnit)},{"depthUnit",q(o.depthUnit)},{"order",q(o.coordinateOrder)},{"rules",rules}});
+    QJsonObject config{{"parser_version",2},{"well",q(o.wellNameOverride)},{"crs",q(o.coordinateSystem)},{"unit",q(o.coordinateUnit)},{"depthUnit",q(o.depthUnit)},{"order",q(o.coordinateOrder)},{"rules",rules}};
+    // Missing means false, preserving the signature of existing default imports
+    // and their edits. Opting into MD/metres must invalidate both duplicate checks.
+    if(o.comprehensiveWellMetreDepth)config["comprehensiveWellMetreDepth"]=true;
+    return json(config);
 }
 static bool digestFile(const QString& path,QString& digest,const CancelCheck& cancelled,std::string& e,long long* bytesRead=nullptr){
     bool largeSegy=QStringList{"sgy","segy"}.contains(QFileInfo(path).suffix().toLower());
@@ -195,14 +199,17 @@ static bool doImport(ProjectStore& store,const QString& input,const QString& ide
     if(!store.exec("RELEASE parsed_objects",{},e)){store.rollback();return false;}
     if(replaceId&&good&&!blocked){if(!store.removeSourceObjects(replaceId,e)||!store.exec("UPDATE issues SET resolved=1,resolution='已按明确映射重新导入；请查看新批次问题' WHERE source_id=?",{replaceId},e)){store.rollback();return false;}}
     if(parsed.status!="failed"&&!saveCache(sourceId)){store.rollback();return false;}
+    if(!store.updateProjectCoordinateSystem(e)){store.rollback();return false;}
     if(!store.commit(e)){store.rollback();return false;}countStatus(parsed.status,report);
     if(parsed.status=="failed"){e=parsed.message.empty()?"文件解析失败":parsed.message;return false;}return true;
 }
 bool DataService::importFile(const std::string& path,const ImportOptions& options,ImportReport& report,std::string& e,const CancelCheck& cancelled){
+    if(impl_->store.readOnly){report={};e="工区以只读方式打开，不能导入或重导入";return false;}
     report={};e.clear();MeasureTime measure(report.elapsedMs);bool ok=doImport(impl_->store,QFileInfo(q(path)).absoluteFilePath(),QFileInfo(q(path)).absoluteFilePath(),options,report,e,cancelled);if(!ok&&cancelled&&cancelled())report.cancelled=true;if(!ok&&!report.cancelled&&!report.failed)++report.failed;return ok;
 }
 static bool importPreparedDirectory(ProjectStore& store,const QStringList& files,const ImportOptions& options,
     ImportReport& report,std::string& error,const ProgressCallback& progress,const CancelCheck& cancelled){
+    if(progress)progress({0,int(files.size()),{},"准备来源索引与解析线程"});
     QHash<QString,std::vector<KnownSource>> known;
     QSqlQuery rows;
     if(!store.exec("SELECT s.original_path,s.hash,coalesce(c.signature,'') FROM sources s LEFT JOIN source_scan_cache c ON c.source_id=s.id WHERE s.active=1 AND s.status<>'failed' AND s.options=?",{optionsJson(options.parsing)},error,&rows))return false;
@@ -220,12 +227,12 @@ static bool importPreparedDirectory(ProjectStore& store,const QStringList& files
         // These formats only yield bounded headers/attachment registrations, not full decoded media.
         // Hashing them uses a 1MiB buffer; a large archive/photo need not block all other workers.
         if(QStringList{"cdr","zip","rar","7z","mp4","mov","jpg","jpeg","png","bmp","gif","tif","tiff","sgy","segy","pdf"}.contains(ext))return 2LL*1024*1024;
-        if(size>=32LL*1024*1024)return budget; // One large expandable/unknown source at a time.
+        if(size>=32LL*1024*1024&&ext!="xml"&&ext!="las")return budget; // Compressed/unknown expansion stays isolated.
         const bool table=QStringList{"xml","xls","xlsx","las","csv","dat","txt",""}.contains(ext);
         // Count both running jobs AND completed results waiting for their turn.
         // SpreadsheetML is uncompressed and streamed row-by-row; the XML tags already
         // occupy most input bytes. XLSX/other tables need a larger expansion allowance.
-        const auto expansion=ext=="xml"?4LL:32LL;
+        const auto expansion=(ext=="xml"||ext=="las")?4LL:32LL;
         return std::min(budget,std::max(2LL*1024*1024,table?size*expansion:2LL*1024*1024));
     };
     long long reserved=0;int scheduled=0,completed=0;
@@ -266,16 +273,22 @@ static bool importPreparedDirectory(ProjectStore& store,const QStringList& files
     if(report.failed){error="导入完成，部分文件失败；请查看来源和问题列表";return false;}return true;
 }
 bool DataService::importDirectory(const std::string& directory,const ImportOptions& options,ImportReport& report,std::string& e,const ProgressCallback& progress,const CancelCheck& cancelled){
+    if(impl_->store.readOnly){report={};e="工区以只读方式打开，不能导入或重导入";return false;}
     report={};e.clear();MeasureTime measure(report.elapsedMs);QDir input(q(directory));if(!input.exists()){e="输入目录不存在";return false;}if(!impl_->store.db.isOpen()){e="请先打开工区";return false;}
     // Walk one directory at a time so we can prune the project's copied sources entirely.
     // The old recursive iterator entered the whole project before discarding its files.
     QStringList files,pending{input.absolutePath()};const auto own=QDir::fromNativeSeparators(QDir(impl_->store.root).absolutePath());
+    QStringList excluded;
+    for(const auto& path:options.excludedDirectories)excluded<<QDir::fromNativeSeparators(QDir(q(path)).absolutePath());
     if(progress)progress({0,0,s(input.absolutePath()),"扫描目录"});
     int enumerated=0;
     while(!pending.isEmpty()){
         if(cancelled&&cancelled()){report.cancelled=true;break;}
         const auto folder=QDir::fromNativeSeparators(pending.takeLast());
         if(folder.compare(own,Qt::CaseInsensitive)==0||folder.startsWith(own+"/",Qt::CaseInsensitive))continue;
+        bool pruned=false;
+        for(const auto& path:excluded)if(folder.compare(path,Qt::CaseInsensitive)==0||folder.startsWith(path+"/",Qt::CaseInsensitive)){pruned=true;break;}
+        if(pruned)continue;
         QDirIterator it(folder,QDir::Files|QDir::Dirs|QDir::Hidden|QDir::NoDotAndDotDot,QDirIterator::NoIteratorFlags);
         while(it.hasNext()){
             if(cancelled&&cancelled()){report.cancelled=true;break;}
@@ -296,13 +309,19 @@ bool DataService::importDirectory(const std::string& directory,const ImportOptio
     }if(report.cancelled){e="导入已取消，当前文件未发布，已完成文件保留";return false;}if(report.failed){e="导入完成，部分文件失败；请查看来源和问题列表";return false;}return true;
 }
 bool DataService::reimportSource(long long id,const ParseOptions& mapping,ImportReport& report,std::string& e,const CancelCheck& cancelled){
+    if(impl_->store.readOnly){report={};e="工区以只读方式打开，不能导入或重导入";return false;}
     report={};e.clear();MeasureTime measure(report.elapsedMs);QSqlQuery r;if(!impl_->store.exec("SELECT original_path,stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源不存在";return false;}
     auto path=impl_->store.absolutePath(r.value(1).toString());ImportOptions options;options.parsing=mapping;options.forceNewBatch=true;return doImport(impl_->store,path,r.value(0).toString(),options,report,e,cancelled,id);
 }
 bool DataService::relocateSource(long long id,const std::string& path,std::string& e){
+    e.clear();
     QSqlQuery r;auto& st=impl_->store;if(!st.exec("SELECT hash,stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源不存在";return false;}
-    auto replacement=QFileInfo(q(path)).absoluteFilePath();QString digest;if(!digestFile(replacement,digest,{},e))return false;
-    if(digest!=r.value(0).toString()){e="新文件与记录身份不符，不能静默替换；请作为新资料导入。地震体身份包含文件大小、修改时间和文件头。";return false;}
+    const auto expected=r.value(0).toString();
+    auto replacement=QFileInfo(q(path)).absoluteFilePath();QString digest;
+    // Prepared sources use full SHA-256 even for SEG-Y. Match the stored identity
+    // scheme, just as verifySource does, instead of guessing from the extension.
+    if(expected.startsWith("quick:")?!digestFile(replacement,digest,{},e):!fullFileSha256(replacement,digest,e))return false;
+    if(digest!=expected){e="新文件与记录身份不符，不能静默替换；请作为新资料导入。";if(expected.startsWith("quick:"))e+="地震体快速身份包含文件大小、修改时间和文件头。";return false;}
     const QString previous=r.value(1).toString();r.finish();
     if(!st.begin(e))return false;
     QSqlQuery objects;if(!st.exec("SELECT id,kind,payload FROM well_objects WHERE source_id=? AND kind IN ('core_photos','attachments')",{id},e,&objects)){st.rollback();return false;}
@@ -317,6 +336,6 @@ bool DataService::relocateSource(long long id,const std::string& path,std::strin
     bool ok=st.exec("UPDATE sources SET stored_path=? WHERE id=?",{replacement,id},e)&&st.exec("UPDATE volumes SET path=? WHERE source_id=?",{replacement,id},e)&&st.exec("UPDATE maps SET image_path=CASE WHEN image_path=? THEN ? ELSE image_path END,source_file=CASE WHEN source_file=? THEN ? ELSE source_file END WHERE source_id=?",{previous,replacement,previous,replacement,id},e)&&st.exec("INSERT INTO changes(kind,entity_id,description) VALUES('source',?,'核验文件身份后重新定位来源')",{id},e)&&st.commit(e);if(!ok)st.rollback();return ok;
 }
 bool DataService::verifySource(long long id,std::string& e)const{
-    QSqlQuery r;const auto& st=impl_->store;if(!st.exec("SELECT hash,stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源不存在";return false;}QString digest;if(!digestFile(st.absolutePath(r.value(1).toString()),digest,{},e))return false;if(digest!=r.value(0).toString()){e="来源文件已改变，请核对后重新导入，不能继续使用旧对象读取";return false;}return true;
+    QSqlQuery r;const auto& st=impl_->store;if(!st.exec("SELECT hash,stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源不存在";return false;}QString digest;const auto expected=r.value(0).toString();const auto path=st.absolutePath(r.value(1).toString());if(expected.startsWith("quick:")?!digestFile(path,digest,{},e):!fullFileSha256(path,digest,e))return false;if(digest!=expected){e="来源文件已改变，请核对后重新导入，不能继续使用旧对象读取";return false;}return true;
 }
 }

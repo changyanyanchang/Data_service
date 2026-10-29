@@ -10,9 +10,23 @@ DataService::DataService():impl_(std::make_unique<Impl>()){}
 DataService::~DataService()=default;
 bool DataService::createProject(const std::string& path,const std::string& name,std::string& error){if(name.empty()){error="工区名称不能为空";return false;}return impl_->store.open(q(path),true,q(name),error);}
 bool DataService::openProject(const std::string& path,std::string& error){return impl_->store.open(q(path),false,{},error);}
+bool DataService::openProjectReadOnly(const std::string& path,std::string& error){return impl_->store.open(q(path),false,{},error,true);}
+bool DataService::snapshotDatabase(const std::string& destination,std::string& error)const{
+    if(!impl_->store.db.isOpen()){error="请先打开工区";return false;}
+    return impl_->store.exec("VACUUM INTO ?",{q(destination)},error);
+}
+bool DataService::isReadOnly()const{return impl_->store.readOnly;}
 void DataService::closeProject(){impl_->store.close();}
 std::string DataService::projectPath()const{return s(impl_->store.root);}
 std::string DataService::projectName()const{return s(impl_->store.name);}
+std::string DataService::projectCrs()const{QSqlQuery r;std::string e;if(!impl_->store.exec("SELECT value FROM ds_meta WHERE key='project_crs'",{},e,&r)||!r.next())return {};return s(r.value(0).toString());}
+std::string DataService::projectCrsUnit()const{QSqlQuery r;std::string e;if(!impl_->store.exec("SELECT value FROM ds_meta WHERE key='project_crs_unit'",{},e,&r)||!r.next())return {};return s(r.value(0).toString());}
+bool DataService::setProjectCrs(const std::string& epsg,const std::string& unit,std::string& e){
+    if(impl_->store.readOnly){e="只读工区不能修改坐标系";return false;}
+    const auto code=q(epsg).trimmed().toUpper();bool digits=false;const auto number=code.mid(5).toLongLong(&digits);
+    if(!code.startsWith("EPSG:")||!digits||number<=0){e="坐标系须采用 EPSG:<数字> 格式";return false;}
+    return impl_->store.exec("INSERT OR REPLACE INTO ds_meta(key,value) VALUES('project_crs',?),('project_crs_unit',?),('project_crs_basis','manual')",{code,q(unit).trimmed()},e);
+}
 bool DataService::listWells(std::vector<WellSummary>& out,std::string& e)const{
     out.clear();QSqlQuery r;if(!impl_->store.exec("SELECT w.id,w.name,(SELECT count(*) FROM log_sets WHERE well_id=w.id),(SELECT count(*) FROM curves c JOIN log_sets l ON l.id=c.set_id WHERE l.well_id=w.id),(SELECT count(*) FROM tracks WHERE well_id=w.id),(SELECT count(*) FROM samples a JOIN sample_tables t ON t.id=a.table_id WHERE t.well_id=w.id),(SELECT count(*) FROM well_objects WHERE well_id=w.id AND kind='time_depth'),(SELECT count(*) FROM well_objects WHERE well_id=w.id AND kind='trajectories'),(w.x IS NOT NULL AND w.y IS NOT NULL),(SELECT coalesce(sum(json_array_length(payload)),0) FROM well_objects WHERE well_id=w.id AND kind='core_photos'),(SELECT count(*) FROM well_objects WHERE well_id=w.id AND kind='attachments'),(SELECT count(*) FROM well_objects WHERE well_id=w.id AND kind='markers') FROM wells w ORDER BY name",{},e,&r))return false;
     while(r.next())out.push_back({r.value(0).toLongLong(),s(r.value(1).toString()),r.value(2).toInt(),r.value(3).toInt(),r.value(4).toInt(),r.value(5).toInt(),r.value(6).toInt(),r.value(7).toInt(),r.value(8).toBool(),r.value(9).toInt(),r.value(10).toInt(),r.value(11).toInt()});return true;
@@ -20,7 +34,17 @@ bool DataService::listWells(std::vector<WellSummary>& out,std::string& e)const{
 bool DataService::readWellInfo(long long id,WellInfo& w,std::string& e)const{
     QSqlQuery r;if(!impl_->store.exec("SELECT name,field_name,well_type,x,y,crs,unit,total_depth,remark FROM wells WHERE id=?",{id},e,&r))return false;if(!r.next()){e="井不存在";return false;}w.wellName=s(r.value(0).toString());w.fieldName=s(r.value(1).toString());w.wellType=s(r.value(2).toString());w.wellheadX=value(r.value(3));w.wellheadY=value(r.value(4));w.coordinateSystem=s(r.value(5).toString());w.coordinateUnit=s(r.value(6).toString());w.totalDrilledDepth=value(r.value(7));w.remark=s(r.value(8).toString());return true;
 }
-bool DataService::listData(const std::string& kind,long long wellId,std::vector<DataEntry>& out,std::string& e)const{
+bool DataService::listWellInfos(std::vector<WellInfoRecord>& out,std::string& e)const{
+    out.clear();QSqlQuery r;
+    if(!impl_->store.exec("SELECT id,name,field_name,well_type,x,y,crs,unit,total_depth,remark FROM wells ORDER BY id",{},e,&r))return false;
+    while(r.next()){
+        WellInfoRecord row;row.id=r.value(0).toLongLong();auto& w=row.value;
+        w.wellName=s(r.value(1).toString());w.fieldName=s(r.value(2).toString());w.wellType=s(r.value(3).toString());
+        w.wellheadX=value(r.value(4));w.wellheadY=value(r.value(5));w.coordinateSystem=s(r.value(6).toString());
+        w.coordinateUnit=s(r.value(7).toString());w.totalDrilledDepth=value(r.value(8));w.remark=s(r.value(9).toString());out.push_back(std::move(row));
+    }return true;
+}
+static bool listEntries(const ProjectStore& store,const std::string& kind,long long wellId,long long sourceId,std::vector<DataEntry>& out,std::string& e){
     out.clear();QString sql;QVariantList args;
     if(kind=="curves")sql="SELECT c.id,l.well_id,l.source_id,l.id,c.name,c.unit||' / '||l.name,l.sample_count FROM curves c JOIN log_sets l ON l.id=c.set_id WHERE (?<=0 OR l.well_id=?) ORDER BY l.id,c.id";
     else if(kind=="intervals")sql="SELECT t.id,t.well_id,t.source_id,0,t.name,t.type,(SELECT count(*) FROM intervals WHERE track_id=t.id) FROM tracks t WHERE (?<=0 OR t.well_id=?) ORDER BY t.id";
@@ -33,7 +57,13 @@ bool DataService::listData(const std::string& kind,long long wellId,std::vector<
     else if(kind=="markers"||kind=="time_depth"||kind=="trajectories"||kind=="core_photos"||kind=="attachments"){sql="SELECT id,well_id,source_id,0,name,kind,CASE WHEN kind='attachments' THEN 1 ELSE coalesce(json_array_length(payload,'$.points'),json_array_length(payload),0) END FROM well_objects WHERE kind=? AND (?<=0 OR well_id=?)";args<<q(kind);}
     else{e="未知数据类别";return false;}
     if(sql.contains("well_id=?"))args<<wellId<<wellId;
-    QSqlQuery r;if(!impl_->store.exec(sql,args,e,&r))return false;while(r.next()){DataEntry v;v.id=r.value(0).toLongLong();v.wellId=r.value(1).toLongLong();v.sourceId=r.value(2).toLongLong();v.parentId=r.value(3).toLongLong();v.name=s(r.value(4).toString());v.kind=kind;v.detail=s(r.value(5).toString());v.count=r.value(6).toLongLong();out.push_back(std::move(v));}return true;
+    if(sourceId>0){sql="WITH data(id,well_id,source_id,parent_id,name,detail,n) AS ("+sql+") SELECT * FROM data WHERE source_id=? ORDER BY parent_id,id";args<<sourceId;}
+    QSqlQuery r;if(!store.exec(sql,args,e,&r))return false;while(r.next()){DataEntry v;v.id=r.value(0).toLongLong();v.wellId=r.value(1).toLongLong();v.sourceId=r.value(2).toLongLong();v.parentId=r.value(3).toLongLong();v.name=s(r.value(4).toString());v.kind=kind;v.detail=s(r.value(5).toString());v.count=r.value(6).toLongLong();out.push_back(std::move(v));}return true;
+}
+bool DataService::listData(const std::string& kind,long long wellId,std::vector<DataEntry>& out,std::string& e)const{return listEntries(impl_->store,kind,wellId,0,out,e);}
+bool DataService::listSourceData(const std::string& kind,long long sourceId,std::vector<DataEntry>& out,std::string& e)const{
+    if(sourceId<=0){out.clear();e="来源编号无效";return false;}
+    return listEntries(impl_->store,kind,0,sourceId,out,e);
 }
 bool DataService::readCurveSlice(long long id,double top,double bottom,bool processed,CurveSlice& out,std::string& e)const{
     out={};if(std::isfinite(top)&&std::isfinite(bottom)&&top>bottom){e="顶深不能大于底深";return false;}
@@ -89,6 +119,15 @@ bool DataService::readTable(const std::string& kind,long long id,long long offse
     while(r.next()){std::vector<std::string> row;for(size_t i=0;i<out.columns.size();++i)row.push_back(s(r.value(int(i)).toString()));out.rows.push_back(std::move(row));}return true;
 }
 bool DataService::listSources(std::vector<SourceEntry>& out,std::string& e)const{out.clear();QSqlQuery r;if(!impl_->store.exec("SELECT id,original_path,kind,status,message,bytes FROM sources ORDER BY id DESC",{},e,&r))return false;while(r.next())out.push_back({r.value(0).toLongLong(),s(r.value(1).toString()),s(r.value(2).toString()),s(r.value(3).toString()),s(r.value(4).toString()),r.value(5).toLongLong()});return true;}
+bool DataService::listSourceIndexEntries(std::vector<SourceIndexEntry>& out,std::string& e)const{
+    out.clear();QSqlQuery r;
+    if(!impl_->store.exec("SELECT id,original_path,stored_path,kind,status,message,bytes,hash FROM sources ORDER BY id DESC",{},e,&r))return false;
+    while(r.next()){
+        SourceIndexEntry row;row.id=r.value(0).toLongLong();row.path=s(r.value(1).toString());row.storedPath=s(r.value(2).toString());
+        row.kind=s(r.value(3).toString());row.status=s(r.value(4).toString());row.message=s(r.value(5).toString());
+        row.bytes=r.value(6).toLongLong();row.sha256=s(r.value(7).toString());out.push_back(std::move(row));
+    }return true;
+}
 bool DataService::listIssues(bool unresolved,std::vector<IssueEntry>& out,std::string& e)const{out.clear();QSqlQuery r;if(!impl_->store.exec("SELECT id,source_id,code,message,original_text,sheet,resolution,row_num,blocking,resolved FROM issues WHERE (?=0 OR resolved=0) ORDER BY blocking DESC,id",{unresolved},e,&r))return false;while(r.next())out.push_back({r.value(0).toLongLong(),r.value(1).toLongLong(),s(r.value(2).toString()),s(r.value(3).toString()),s(r.value(4).toString()),s(r.value(5).toString()),s(r.value(6).toString()),r.value(7).toInt(),r.value(8).toBool(),r.value(9).toBool()});return true;}
 bool DataService::sourcePath(long long id,std::string& path,std::string& e)const{QSqlQuery r;if(!impl_->store.exec("SELECT stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源记录不存在";return false;}path=s(impl_->store.absolutePath(r.value(0).toString()));return true;}
 bool DataService::readDocument(long long id,std::string& text,std::string& e)const{QSqlQuery r;if(!impl_->store.exec("SELECT document FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源记录不存在";return false;}text=s(r.value(0).toString());return true;}

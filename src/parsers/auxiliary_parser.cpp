@@ -128,9 +128,9 @@ bool address(const QString& value,int& row,int& col) {
 }
 // XLSX is XML inside ZIP. Reading physical references avoids FreeXL limitations
 // with some OOXML producers and preserves blank but declared worksheet extents.
-bool officeTextEntries(QFile& file,QVector<paleo::io::ZipEntry>& entries,const CancelCheck& cancel,QString& error,bool workbook=false);
-bool extractFileEntry(QFile& file,const paleo::io::ZipEntry& entry,QByteArray& xml,QString& error);
-bool readXlsx(QFile& file,const paleo::io::ZipListResult& list,ParsedFile& out,const CancelCheck& cancel,QString& error) {
+bool officeTextEntries(QFile& file,QVector<paleo::data::zip::ZipEntry>& entries,const CancelCheck& cancel,QString& error,bool workbook=false);
+bool extractFileEntry(QFile& file,const paleo::data::zip::ZipEntry& entry,QByteArray& xml,QString& error);
+bool readXlsx(QFile& file,const paleo::data::zip::ZipListResult& list,ParsedFile& out,const CancelCheck& cancel,QString& error) {
     auto extract=[&](const QString& path,QByteArray& xml)->bool {
         const auto* entry=list.entry(path);
         if(!entry) {error="工作簿缺少条目："+path;return false;}
@@ -243,7 +243,7 @@ bool readWorkbook(const QString& path, ParsedFile& out, const CancelCheck& cance
     QFileInfo info(path);
     if(info.suffix().compare("xlsx",Qt::CaseInsensitive)==0) {
         QFile file(path);if(!file.open(QIODevice::ReadOnly)) {error=file.errorString();return false;}
-        paleo::io::ZipListResult list;
+        paleo::data::zip::ZipListResult list;
         if(!officeTextEntries(file,list.entries,cancel,error,true))return false;
         return readXlsx(file,list,out,cancel,error);
     }
@@ -355,10 +355,83 @@ bool isDepthHeader(const QString& t) {
 bool matches(const QString& t,const QStringList& keys) {const auto k=key(t);for(const auto& word:keys) if(k==word||k.startsWith(word+"(")||k.startsWith(word+QStringLiteral("（"))) return true;return false;}
 struct Block {int row=0,depth=0,bottom=0,separator=0,name=0,well=0,type=0,end=0,start=0; bool interval=false;};
 
-QString workbookWell(ParsedFile& out,const ParseOptions& options) {
+int wellheadCoordinateAxis(QString label) {
+    label=key(label);
+    if(label.startsWith(QStringLiteral("井口")))label.remove(0,2);
+    else if(label.startsWith("wellhead"))label.remove(0,8);
+    const auto parts=label.split(QRegularExpression(QStringLiteral("[()（）/,，]")),Qt::SkipEmptyParts);
+    int literalAxis=0,semanticAxis=0;
+    for(int i=0;i<parts.size();++i) {
+        const auto& part=parts[i];
+        if(QStringList{"m","ft","米","英尺","degree","degrees","度"}.contains(part)) {
+            if(i==0)return 0;
+            continue; // A unit label alone does not confirm the coordinate reference.
+        }
+        const int literal=part=="x"?1:part=="y"?2:0;
+        if(literal) {if(literalAxis)return 0;literalAxis=literal;continue;}
+        int semantic=0;
+        if(QStringList{"横坐标","东坐标","easting","east"}.contains(part))semantic=1;
+        else if(QStringList{"纵坐标","北坐标","northing","north"}.contains(part))semantic=2;
+        if(!semantic||semanticAxis)return 0;
+        semanticAxis=semantic;
+    }
+    // Match complete labels, not substrings: 井底横坐标/横坐标位移/X(轨迹)
+    // describe other positions. Preserve X(纵坐标)/Y(横坐标) axis conventions.
+    return semanticAxis?semanticAxis:literalAxis;
+}
+
+int mapCoordinates(ParsedFile& out,const ParseOptions& options,const CancelCheck& cancel,QSet<QString>& handled,QSet<QString>* declaredWells=nullptr) {
+    int mapped=0;QSet<QString> blocked;
+    for(const auto& table:out.sourceTables) {
+        Rows headers;for(const auto& cell:table.cells)if(cell.row<=60)headers[cell.row][cell.column]=qs(cell.text);
+        const auto sheet=qs(table.sheetName);
+        for(auto header=headers.cbegin();header!=headers.cend();++header) {
+            int name=0,x=0,y=0;bool ambiguous=false,depth=false;
+            for(auto c=header->cbegin();c!=header->cend();++c) {
+                const auto label=key(c.value());
+                if(isDepthHeader(label)||matches(label,{"tvd","tvdss","顶深","底深"}))depth=true;
+                if(matches(label,{"井号","井名","well","wellname","well_name"})) {if(name)ambiguous=true;name=c.key();}
+                const int axis=wellheadCoordinateAxis(label);
+                if(axis==1){if(x)ambiguous=true;x=c.key();}
+                if(axis==2){if(y)ambiguous=true;y=c.key();}
+            }
+            if(!name||!x||!y||depth)continue; // A trajectory/sample position is not a wellhead.
+            handled.insert(sheet);
+            if(ambiguous){issue(out,"coordinate_columns_ambiguous","井位表存在重复坐标或井名列，保留原表待核对",sheet,header.key(),true);break;}
+            QSet<QString> seen;
+            const auto rows=rowsOf(table);
+            for(auto r=rows.upperBound(header.key());r!=rows.cend();++r) {
+                if((r.key()%128)==0&&stopped(cancel))return -1;
+                const auto wellName=qs(canonicalWellName(ss(r->value(name))));
+                if(wellName.isEmpty())continue;
+                if(declaredWells)declaredWells->insert(wellName);
+                double vx=Missing,vy=Missing;
+                const bool duplicate=seen.contains(wellName);seen.insert(wellName);
+                if(duplicate||!numeric(r->value(x),vx)||!numeric(r->value(y),vy)) {
+                    blocked.insert(wellName);
+                    for(auto& well:out.wells)if(qs(well.wellInfo.wellName)==wellName)well.wellInfo.wellheadX=well.wellInfo.wellheadY=Missing;
+                    issue(out,"coordinate_row_invalid","井位重复或坐标无效，未生成可定位坐标",sheet,r.key(),true,wellName);
+                    continue;
+                }
+                auto& info=wellFor(out,wellName).wellInfo;
+                if(blocked.contains(wellName))continue;
+                if(std::isfinite(info.wellheadX)&&(info.wellheadX!=vx||info.wellheadY!=vy)) {
+                    info.wellheadX=info.wellheadY=Missing;blocked.insert(wellName);
+                    issue(out,"coordinate_conflict","多个工作表的井位不一致，保留原表待核对",sheet,r.key(),true,wellName);continue;
+                }
+                info.wellheadX=vx;info.wellheadY=vy;info.coordinateSystem=options.coordinateSystem;info.coordinateUnit=options.coordinateUnit;++mapped;
+            }
+            if(options.coordinateSystem.empty()||options.coordinateUnit.empty())issue(out,"coordinate_reference_unknown","井口坐标已按明确表头读取；坐标系或单位未声明，使用前需确认",sheet,header.key());
+            break;
+        }
+    }return mapped;
+}
+
+QString workbookWell(ParsedFile& out,const ParseOptions& options,const QSet<QString>& ignored,const QSet<QString>& coordinateWells) {
     if(!options.wellNameOverride.empty()) return qs(options.wellNameOverride).trimmed().toUpper();
     const auto fromPath=pathWell(qs(options.sourceContextPath.empty()?out.path:options.sourceContextPath));QSet<QString> declared;
     for(const auto& table:out.sourceTables) {
+        if(ignored.contains(qs(table.sheetName)))continue;
         const auto rows=rowsOf(table);
         for(auto row=rows.cbegin();row!=rows.cend()&&row.key()<=60;++row) for(auto c=row->cbegin();c!=row->cend();++c) {
             const auto label=key(c.value());
@@ -376,6 +449,10 @@ QString workbookWell(ParsedFile& out,const ParseOptions& options) {
             declared.unite(names);
         }
     }
+    // A single-well coordinate page can identify the other pages. Keep every
+    // declared row name (even invalid XY), so a multi-well table never becomes
+    // a single-well fallback just because only one location parsed successfully.
+    if(coordinateWells.size()==1)declared.unite(coordinateWells);
     if(!fromPath.isEmpty()) {
         for(const auto& name:declared) if(name!=fromPath) issue(out,"well_conflict","工作簿井号与文件或目录井号不一致；请核对原资料后指定井名重新导入",{},0,true,name+" / "+fromPath);
         return fromPath;
@@ -655,7 +732,7 @@ int mapSamples(ParsedFile& out,const ParseOptions& options,const CancelCheck& ca
 // Rock-core reports can contain hundreds of MiB of photographs. Read only the
 // ZIP directory and selected text entries: image/video payloads stay on disk.
 // Reuse the shared decompressor and CRC checks for each bounded entry.
-bool officeTextEntries(QFile& file,QVector<paleo::io::ZipEntry>& entries,const CancelCheck& cancel,QString& error,bool workbook) {
+bool officeTextEntries(QFile& file,QVector<paleo::data::zip::ZipEntry>& entries,const CancelCheck& cancel,QString& error,bool workbook) {
     const auto fail=[&](const QString& message) {error=message;return false;};
     const auto u16=[](const QByteArray& b,int p) {return qFromLittleEndian<quint16>(reinterpret_cast<const uchar*>(b.constData()+p));};
     const auto u32=[](const QByteArray& b,int p) {return qFromLittleEndian<quint32>(reinterpret_cast<const uchar*>(b.constData()+p));};
@@ -691,7 +768,7 @@ bool officeTextEntries(QFile& file,QVector<paleo::io::ZipEntry>& entries,const C
         const int nameLength=u16(directory,offset+28),extraLength=u16(directory,offset+30),commentLength=u16(directory,offset+32);
         const int length=46+nameLength+extraLength+commentLength;
         if(length>directory.size()-offset) return fail("文档目录条目被截断");
-        paleo::io::ZipEntry entry;
+        paleo::data::zip::ZipEntry entry;
         entry.name=QString::fromUtf8(directory.constData()+offset+46,nameLength);
         entry.method=u16(directory,offset+10);entry.crc32=u32(directory,offset+16);
         entry.compressedSize=u32(directory,offset+20);entry.uncompressedSize=u32(directory,offset+24);entry.localHeaderOffset=u32(directory,offset+42);
@@ -731,7 +808,7 @@ bool officeTextEntries(QFile& file,QVector<paleo::io::ZipEntry>& entries,const C
     return true;
 }
 
-bool extractFileEntry(QFile& file,const paleo::io::ZipEntry& entry,QByteArray& xml,QString& error) {
+bool extractFileEntry(QFile& file,const paleo::data::zip::ZipEntry& entry,QByteArray& xml,QString& error) {
     if(!file.seek(qint64(entry.localHeaderOffset))) {error="无法定位 ZIP 条目";return false;}
     QByteArray local=file.read(30);
     if(local.size()!=30||qFromLittleEndian<quint32>(reinterpret_cast<const uchar*>(local.constData()))!=0x04034b50u) {error="ZIP 条目本地头无效";return false;}
@@ -742,13 +819,13 @@ bool extractFileEntry(QFile& file,const paleo::io::ZipEntry& entry,QByteArray& x
     if(local.size()!=30+remaining) {error="ZIP 条目被截断";return false;}
     if(QString::fromUtf8(local.constData()+30,nameLength)!=entry.name) {error="ZIP 条目名称与目录不符";return false;}
     auto boundedEntry=entry;boundedEntry.localHeaderOffset=0;
-    return paleo::io::zipExtractEntry(local,boundedEntry,&xml,&error);
+    return paleo::data::zip::zipExtractEntry(local,boundedEntry,&xml,&error);
 }
 
 bool readOfficeText(const QString& path,ParsedFile& out,const CancelCheck& cancel,QString& error) {
     QFile file(path);
     if(!file.open(QIODevice::ReadOnly)) {error="无法打开文档："+file.errorString();return false;}
-    QVector<paleo::io::ZipEntry> entries;
+    QVector<paleo::data::zip::ZipEntry> entries;
     if(!officeTextEntries(file,entries,cancel,error)) return false;
     QString text;
     bool found=false;
@@ -780,6 +857,15 @@ bool readOfficeText(const QString& path,ParsedFile& out,const CancelCheck& cance
 }
 }
 
+bool mapWellCoordinateTables(ParsedFile& out,const ParseOptions& options,const CancelCheck& cancelled) {
+    QSet<QString> handled;const int count=mapCoordinates(out,options,cancelled,handled);
+    if(handled.empty())return false;
+    if(count<0){out.status="failed";out.message="已取消";out.wells.clear();return true;}
+    out.kind="coordinates";out.status=out.issues.empty()?"parsed":"review";
+    out.message="按明确表头读取 "+std::to_string(count)+" 条井位；原始单元格保留";
+    return true;
+}
+
 ParsedFile parseAuxiliaryFile(const std::string& path,const ParseOptions& options,const CancelCheck& cancelled) {
     ParsedFile out;out.path=path;
     const QFileInfo info(qs(path));const auto ext=info.suffix().toLower();
@@ -789,12 +875,13 @@ ParsedFile parseAuxiliaryFile(const std::string& path,const ParseOptions& option
         out.kind="workbook";QString error;
         if(!readWorkbook(info.filePath(),out,cancelled,error)) {out.status="failed";out.message=ss(error);out.sourceTables.clear();return out;}
         if(stopped(cancelled)) {out.status="failed";out.message="已取消";out.sourceTables.clear();return out;}
-        QSet<QString> handledSheets;
-        const auto well=workbookWell(out,options);
+        QSet<QString> handledSheets,coordinateWells;
+        const int coordinates=mapCoordinates(out,options,cancelled,handledSheets,&coordinateWells);
+        const auto well=workbookWell(out,options,handledSheets,coordinateWells);
         const int cards=mapGrainCards(out,options,cancelled,well,handledSheets);
         const int series=cards<0?-1:mapWellSeries(out,options,cancelled,well,handledSheets);
         const int rows=series<0?-1:mapSamples(out,options,cancelled,handledSheets,well);
-        const int count=rows<0?-1:cards+rows;
+        const int count=rows<0||coordinates<0?-1:cards+rows+coordinates;
         if(count<0||stopped(cancelled)) {out.status="failed";out.message="已取消";out.sourceTables.clear();out.wells.clear();out.issues.clear();return out;}
         // A warning alone does not stop the store from persisting well objects.
         // Conflicting identities must therefore expose original tables only,
