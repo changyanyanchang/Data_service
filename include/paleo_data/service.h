@@ -479,6 +479,8 @@ public:
     // 登记子层段成果；必须引用方案中存在的 SubIntervalId（或 aggregate 父单元，或 legacy 标签）。
     bool bindSubIntervalResult(const SubIntervalResultBinding& binding, SubIntervalResultBinding& stored,
                                std::string& error);
+    // Invalidate an existing result after an input/catalog change; never revives stale geometry.
+    bool invalidateSubIntervalResult(const std::string& id, std::string& error);
     // subInterval 为空时列出方案全部成果。
     bool listSubIntervalResults(const std::string& schemeId, const SubIntervalId& subInterval,
                                 std::vector<SubIntervalResultBinding>& result, std::string& error) const;
