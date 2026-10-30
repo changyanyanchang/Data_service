@@ -34,7 +34,9 @@ struct SeismicFileInfo {
     int checkedHeaders = 0;
     int coordinateUnitsCode = 0;    // SEG-Y 道头单位码；1=长度，但不能仅据此断言是米。
     int coordinateScalar = 0;      // 原始缩放码：正数乘，负数除以绝对值，0视为1。
+    std::string coordinateLengthUnit; // m/ft only when both trace and binary headers explicitly declare length units
     std::vector<std::string> warnings;
+    std::vector<double> cornerX, cornerY; // four actual corner traces: min/min, min/max, max/max, max/min; empty if unavailable
 };
 
 // 测区平面范围的一个角点。顺序固定为

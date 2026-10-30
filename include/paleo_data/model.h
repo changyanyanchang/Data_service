@@ -168,6 +168,10 @@ struct TrajectorySurvey {
 struct TimeDepthPoint {
     double depthValue = Missing; // 深度值
     double timeValue = Missing; // 对应的时间值
+    // 来源提供的同一采样位置；不从井口坐标或图片补齐。旧的二列时深表保持 Missing。
+    double x = Missing;
+    double y = Missing;
+    double z = Missing;
 };
 
 // 井级时深关系，放在 WellDataset 下与 wellbore 并列，供地震数据使用。
@@ -181,6 +185,10 @@ struct TimeDepthTable {
     std::vector<TimeDepthPoint> depthTimePairs; // 时深配对采样点
     std::string sourceFile; // 原始时深文件路径
     std::string sourceSheet; // 原始工作表名
+    // Petrel checkshots 可同时提供沿井 X/Y/Z；Z 的单位、方向、基准独立于 MD。
+    DepthInfo positionDepthInfo;
+    std::string coordinateSystem;
+    std::string coordinateUnit;
 };
 
 // 地震层位文件中的一行：INLINE、XLINE、X、Y、Z 时间。

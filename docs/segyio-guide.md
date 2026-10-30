@@ -4,6 +4,15 @@
 
 ## 对象与方法
 
+2026-10-30：独立文件预览可调用 `inspectSeismicFile`、`readSeismicFileLine`、
+`readSeismicFileTimeSlice`，与已登记地震体使用相同的只读 segyio 读取器、预算和
+取消规则，不隐式导入或创建工区。已登记对象继续优先用编号接口，以保留来源校验。
+`readSeismicGridSection`／`readSeismicFileGridSection` 接收有序 IL／XL 路径，返回
+真实道及原始采样；可显式选择沿路径插值，默认最近道。该网格入口的 `distances`
+是线号弧长，区别于 XY 剖面的坐标弧长；不推断 CRS 或坐标单位。
+原生元信息提供四个实际角点道的坐标（缺失时为空），`coordinateLengthUnit` 仅在
+道头长度码和二进制头测量制均明确时报告 m／ft；不会把单位未知的坐标当成米。
+
 | 方法 | 主要输入 | 结果 |
 |---|---|---|
 | `readVolume` | 地震体编号 | 数据库登记元信息，`traces` 保持空 |

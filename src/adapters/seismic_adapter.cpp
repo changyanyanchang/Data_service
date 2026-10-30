@@ -234,11 +234,14 @@ bool DataService::readSeismicTrace(long long volumeId,long long traceIndex,const
     }catch(const std::exception& e){return reject(error,std::string("地震单道读取失败：")+e.what());}
 }
 bool DataService::readSeismicLine(long long volumeId,const std::string& direction,int lineNumber,const SectionReadOptions& options,SeismicSectionResult& result,std::string& error,const CancelCheck& cancel){
+    result={};error.clear();SeismicVolume volume;if(!sourceVolume(*this,volumeId,volume,error))return false;
+    return readSeismicFileLine(volume.dataFile,direction,lineNumber,options,result,error,cancel);
+}
+bool DataService::readSeismicFileLine(const std::string& path,const std::string& direction,int lineNumber,const SectionReadOptions& options,SeismicSectionResult& result,std::string& error,const CancelCheck& cancel){
     result={};error.clear();try{
         if(stopped(cancel,error)||!sectionOptions(options,error))return false;
         if(direction!="inline"&&direction!="crossline")return reject(error,"direction应为inline或crossline");
-        SeismicVolume volume;if(!sourceVolume(*this,volumeId,volume,error))return false;
-        segy_detail::Reader reader;if(!reader.open(volume.dataFile,error,cancel)||!geometry(reader,error))return false;
+        segy_detail::Reader reader;if(!reader.open(path,error,cancel)||!geometry(reader,error))return false;
         const auto& fixed=direction=="inline"?reader.inlines():reader.crosslines();
         if(!std::binary_search(fixed.begin(),fixed.end(),lineNumber))return reject(error,"请求测线编号不存在");
         const auto& axis=direction=="inline"?reader.crosslines():reader.inlines();
@@ -266,10 +269,19 @@ bool DataService::readSeismicLine(long long volumeId,const std::string& directio
         if(!any)return reject(error,"测线没有有限振幅");if(stopped(cancel,error))return false;result=std::move(output);return true;
     }catch(const std::exception& e){return reject(error,std::string("地震测线读取失败：")+e.what());}
 }
+bool DataService::inspectSeismicFile(const std::string& path,SeismicFileInfo& result,std::string& error,const CancelCheck& cancel){
+    result={};error.clear();return segy_detail::inspectSegyFile(path,result,error,cancel);
+}
 bool DataService::readSeismicTimeSlice(long long volumeId,double timeMs,const TimeSliceReadOptions& options,SeismicTimeSliceResult& result,std::string& error,const CancelCheck& cancel,const TimeSliceTileCallback& tileReady){
     result={};error.clear();try{if(stopped(cancel,error))return false;SeismicVolume volume;if(!sourceVolume(*this,volumeId,volume,error))return false;
         segy_detail::Reader reader;if(!reader.open(volume.dataFile,error,cancel))return false;
         return timeSliceFromReader(reader,timeMs,options,result,error,cancel,tileReady);
+    }catch(const std::exception& e){return reject(error,std::string("原生时间切片读取失败：")+e.what());}
+}
+bool DataService::readSeismicFileTimeSlice(const std::string& path,double timeMs,const TimeSliceReadOptions& options,SeismicTimeSliceResult& result,std::string& error,const CancelCheck& cancel){
+    result={};error.clear();try{if(stopped(cancel,error))return false;
+        segy_detail::Reader reader;if(!reader.open(path,error,cancel))return false;
+        return timeSliceFromReader(reader,timeMs,options,result,error,cancel,{});
     }catch(const std::exception& e){return reject(error,std::string("原生时间切片读取失败：")+e.what());}
 }
 void DataService::clearSeismicSliceCache(){segy_detail::clearSliceCache();}

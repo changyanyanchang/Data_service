@@ -70,8 +70,16 @@ ParsedFile parseFile(const std::string& path, const ParseOptions& options, const
     if (!info.isFile()) return problem(path,"unknown","路径不存在或不是普通文件");
     if(name.endsWith(".crsmeta.xml",Qt::CaseInsensitive))return parseSpatialCompanion(path,cancelled);
     if(ext=="xml")return parseSpreadsheetXmlFile(path,options,cancelled);
-    if(ext.isEmpty()||ext=="txt"||ext=="prn"||ext=="vsp"||ext=="txt-uniq1"){
-        QFile probe(info.absoluteFilePath());if(probe.open(QIODevice::ReadOnly)){auto head=probe.read(4096);if(head.contains("Petrel checkshots format"))return parseTimeDepthFile(path,options,cancelled);if(head.contains("Petrel well head")||head.contains("Petrel well heads"))return parseTextFile(path,options,cancelled);}
+    // Petrel checkshots also use their dedicated extension.
+    if(ext.isEmpty()||ext=="txt"||ext=="prn"||ext=="vsp"||ext=="txt-uniq1"||ext=="checkshots"){
+        QFile probe(info.absoluteFilePath());if(probe.open(QIODevice::ReadOnly)){
+            const auto head=probe.read(4096);
+            if(head.contains("Petrel checkshots format"))return parseTimeDepthFile(path,options,cancelled);
+            if(head.contains("Petrel well head")||head.contains("Petrel well heads"))return parseTextFile(path,options,cancelled);
+            // Exported Petrel horizons commonly have only the horizon name, no extension.
+            const QRegularExpression horizonHeader("^\\s*INLINE\\s*:\\s*[+-]?[0-9]+\\s+XLINE\\s*:",QRegularExpression::CaseInsensitiveOption);
+            if(horizonHeader.match(QString::fromUtf8(head)).hasMatch())return parseTextFile(path,options,cancelled);
+        }
     }
     if (ext=="csv" || ext=="txt" || ext=="dat" || ext=="las" || (ext.isEmpty() && info.absolutePath().contains(QStringLiteral("井坐标")))) return parseTextFile(path,options,cancelled);
     if (ext=="sgy" || ext=="segy") return segy(path,options,cancelled);

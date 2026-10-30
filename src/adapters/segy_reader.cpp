@@ -269,6 +269,8 @@ bool Reader::open(const std::string& path, std::string& error, const Cancel& can
     const Header& first=seeds.begin()->second;
     p.delayMs=p.delay(first); facts.firstTime=p.delayMs; facts.sampleInterval=p.intervalUs/1000.0;
     facts.coordinateUnitsCode=u16(first,88); facts.coordinateScalar=i16(first,70);
+    const int measurement=p.file->metadata.endianness==SEGY_LSB?qFromLittleEndian<quint16>(binary.data()+54):qFromBigEndian<quint16>(binary.data()+54);
+    if(facts.coordinateUnitsCode==1)facts.coordinateLengthUnit=measurement==1?"m":measurement==2?"ft":"";
     bool anyStandardIl=false,anyStandardXl=false,anyCdpXY=false,anySourceXY=false;
     for (const auto& [ordinal,h]:seeds) {
         (void)ordinal; anyStandardIl|=i32(h,188)!=0; anyStandardXl|=i32(h,192)!=0;
@@ -478,7 +480,23 @@ bool Reader::covers(double x,double y) const {
     return std::hypot(x-edgeX,y-edgeY)<=p.mapper.fit().maxResidual+1e-6;
 }
 bool inspectSegyFile(const std::string& path,SeismicFileInfo& result,std::string& error,const Cancel& cancel) {
-    result={};error.clear();try {Reader reader;if(!reader.open(path,error,cancel))return false;result=reader.info();return true;}
+    result={};error.clear();try {
+        Reader reader;if(!reader.open(path,error,cancel))return false;
+        auto info=reader.info();
+        if(reader.hasCoordinateMap()&&!reader.inlines().empty()&&!reader.crosslines().empty()) {
+            const int il[]={info.inlineMin,info.inlineMin,info.inlineMax,info.inlineMax};
+            const int xl[]={info.crosslineMin,info.crosslineMax,info.crosslineMax,info.crosslineMin};
+            for(int i=0;i<4;++i) {
+                const auto ordinal=reader.traceIndex(il[i],xl[i]);SeismicTraceResult trace;std::string detail;
+                if(ordinal<0||!reader.readTrace(ordinal,0,1,trace,detail,cancel)||!std::isfinite(trace.x)||!std::isfinite(trace.y)) {
+                    if(cancel&&cancel()){error="地震读取已取消";return false;}
+                    info.cornerX.clear();info.cornerY.clear();break;
+                }
+                info.cornerX.push_back(trace.x);info.cornerY.push_back(trace.y);
+            }
+        }
+        result=std::move(info);return true;
+    }
     catch(const std::exception& e){return fail(error,std::string("SEG-Y 检查失败：")+e.what());}
 }
 }
