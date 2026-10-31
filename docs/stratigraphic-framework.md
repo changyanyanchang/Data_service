@@ -7,6 +7,7 @@
 
 - 修订不可变（JSON 快照 + sha256），提交需 expected head，回退生成新修订。
 - 提交同事务把几何发生变化的子层段成果与父单元综合标为 `stale`。
+- `invalidateSubIntervalResult(id, error)` 将输入变更后的成果单向标为 `stale`，保留原成果 ID、来源、修订及历史内容；重复失效幂等，只读工程拒绝写入。宿主可按不可变版本 ID 重建登记并同步输入失效，不用再次执行地质算法。
 - 历史单界面标签只能 `legacy_unresolved`；E12/E3/E4 算法分段不变，`Interval.legacySegment` 仅为引用。
 - 地震掩膜按每道顶/底比例生成（半开区间，S4 含底），缺失/倒置道值为 2。
 

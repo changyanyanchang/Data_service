@@ -67,13 +67,14 @@ struct DataEntry {
     std::string detail;        // 供界面查看的摘要；业务代码不要通过拆分此字符串取数。
     long long count=0;         // 该类别的记录数，例如曲线样点数或本道层段数。
 };
-struct SourceEntry { long long id=0; std::string path, kind, status, message; long long bytes=0; };
+struct SourceEntry { long long id=0; std::string path, kind, status, message; long long bytes=0; bool active=true; };
 // Complete stored identity for index projections; separate from the original lightweight list contract.
 struct SourceIndexEntry {
     long long id=0;
     std::string path, storedPath, kind, status, message;
     long long bytes=0;
     std::string sha256;
+    bool active=true; // false retains import history; never project it as current data.
 };
 struct IssueEntry { long long id=0, sourceId=0; std::string code, message, originalText, sheet, resolution; int row=0; bool blocking=false, resolved=false; };
 // 通用的分页展示表。rows 是本页内容，totalRows 是总行数；表格值统一为文字。
@@ -479,6 +480,8 @@ public:
     // 登记子层段成果；必须引用方案中存在的 SubIntervalId（或 aggregate 父单元，或 legacy 标签）。
     bool bindSubIntervalResult(const SubIntervalResultBinding& binding, SubIntervalResultBinding& stored,
                                std::string& error);
+    // Invalidate an existing result after an input/catalog change; never revives stale geometry.
+    bool invalidateSubIntervalResult(const std::string& id, std::string& error);
     // subInterval 为空时列出方案全部成果。
     bool listSubIntervalResults(const std::string& schemeId, const SubIntervalId& subInterval,
                                 std::vector<SubIntervalResultBinding>& result, std::string& error) const;

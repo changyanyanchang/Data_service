@@ -179,6 +179,12 @@ static void persistence()
     CHECK(restored.parentRevision == next.revision && near(restored.divisions[0].fractions[1], 0.5));
     StratigraphicScheme old; CHECK(ds.readStratigraphicScheme(head.id, next.revision.value, old, err) && near(old.divisions[0].fractions[1], 0.6));
     std::vector<StratigraphicSchemeRevisionSummary> revs; CHECK(ds.listStratigraphicSchemeRevisions(head.id, revs, err) && revs.size() == 3);
+    std::string invalidated;
+    for (const auto& b : all) if (b.kind == "single_factor") invalidated = b.id;
+    CHECK(!invalidated.empty());
+    CHECK(!ds.invalidateSubIntervalResult({}, err));
+    CHECK(ds.invalidateSubIntervalResult(invalidated, err));
+    CHECK(ds.invalidateSubIntervalResult(invalidated, err)); // idempotent, preserves identity/history
     ds.closeProject();
     // 只读工程：可读不可写
     DataService ro; CHECK(ro.openProjectReadOnly(path, err));
@@ -186,6 +192,11 @@ static void persistence()
     CHECK(!ro.commitStratigraphicScheme(roHead, roHead.revision.value, next, issues2, err));
     SubIntervalResultBinding rb, ro2; rb.kind = "map"; rb.schemeId = head.id; rb.subInterval = subs[0]->id;
     CHECK(!ro.bindSubIntervalResult(rb, ro2, err));
+    CHECK(!ro.invalidateSubIntervalResult(invalidated, err));
+    CHECK(ro.listSubIntervalResults(head.id, {}, all, err) && all.size() == 5);
+    bool retained = false;
+    for (const auto& b : all) if (b.id == invalidated) retained = b.status == "stale";
+    CHECK(retained);
 }
 
 static void legacyProjectWithoutFramework()

@@ -307,6 +307,19 @@ bool DataService::bindSubIntervalResult(const SubIntervalResultBinding& in, SubI
     return true;
 }
 
+bool DataService::invalidateSubIntervalResult(const std::string& id, std::string& error)
+{
+    error.clear();
+    auto& st = impl_->store;
+    if (st.readOnly) { error = "只读工程不能更新成果状态"; return false; }
+    if (id.empty()) { error = "成果 ID 为空"; return false; }
+    Transaction tx(st, error);
+    if (!tx.active || !ensureSchema(st, error)) return false;
+    if (!st.exec("UPDATE strat_result_bindings SET status='stale' WHERE id=? AND status IN ('current','candidate','review_required')",
+                 {q(id)}, error)) return false;
+    return tx.commit(error);
+}
+
 bool DataService::listSubIntervalResults(const std::string& schemeId, const SubIntervalId& subInterval,
                                          std::vector<SubIntervalResultBinding>& result, std::string& error) const
 {

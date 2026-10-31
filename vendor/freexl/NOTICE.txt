@@ -37,4 +37,9 @@ Required runtime dependency: the already distributed GNU libiconv iconv-2.dll.
 Select the compatibility DLL with PALEO_FREEXL_LIBRARY or place it next to the
 application executable. Do not overwrite an unrelated OSGeo4W installation.
 
+Host integration, 2026-10-31: the build script accepts -IconvDll and -CharsetDll
+to match distributions with iconv.dll / charset.dll instead of iconv-2.dll.
+The host ships the result as paleo_freexl.dll and prefers that private name;
+this leaves GDAL's own FreeXL dependency and its wider ABI unchanged.
+
 The original upstream binary fixtures are intentionally excluded. Use the data-service synthetic tests to check this source-only checkout; optional acceptance tools operate on caller-supplied files.

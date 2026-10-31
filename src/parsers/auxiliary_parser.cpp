@@ -98,7 +98,8 @@ struct FreeXl {
         QStringList candidates;
         const auto configured=qEnvironmentVariable("PALEO_FREEXL_LIBRARY");
         if(!configured.isEmpty()) candidates << configured;
-        candidates << QDir(QCoreApplication::applicationDirPath()).filePath("freexl") << "freexl";
+        candidates << QDir(QCoreApplication::applicationDirPath()).filePath("paleo_freexl")
+                   << QDir(QCoreApplication::applicationDirPath()).filePath("freexl") << "freexl";
         for(const auto& candidate:candidates) {
             library.setFileName(candidate);
             if(library.load()) break;
