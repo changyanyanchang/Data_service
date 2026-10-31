@@ -19,6 +19,13 @@ preflights the total curve sample, interval, marker and photo counts (default
 memory limit. Cancellation is checked between object reads. Output is empty
 on failure, budget rejection or cancellation.
 
+`includeLogs`, `includeIntervals`, `includeMarkers` and `includePhotos` default
+to true. Consumers needing only geological intervals can disable the other
+groups; omitted groups are neither decoded nor counted against `maxValues`.
+The well identity, default depth conventions and project coordinates remain
+available in the same read snapshot. This avoids reading millions of curve
+samples to calculate an interval-based factor.
+
 `readProjectCoordinates(result, error)` returns the two stored project CRS fields
 in one query, distinguishing missing metadata from an inaccessible database.
 `WellPlotData.well.coordinateSystem/coordinateUnit` always describe the well's

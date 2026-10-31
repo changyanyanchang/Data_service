@@ -51,6 +51,12 @@ int main(int argc,char** argv) {
     check(data.logs.front().value.logCurves.front().sampleValues.front()==10,"raw selection");
     WellPlotOptions small;small.maxValues=1;
     check(!service.readWellPlotData(wells.front(),small,data,error)&&data.logs.empty()&&data.wellId==0,"budget preflight clears output");
+    WellPlotOptions intervalsOnly;intervalsOnly.includeLogs=false;intervalsOnly.includeMarkers=false;
+    intervalsOnly.includePhotos=false;intervalsOnly.maxValues=2;
+    check(service.readWellPlotData(wells.front(),intervalsOnly,data,error),error);
+    check(data.logs.empty()&&data.markers.empty()&&data.photos.empty()&&data.intervals.size()==2,"interval-only groups and budget");
+    check(data.defaultDepthInfo.depthType=="MD"&&data.defaultDepthInfo.depthUnit=="m"&&
+          data.intervals.front().value.intervals.front().topDepth==100,"interval-only conventions and values after source removal");
     check(!service.readWellPlotData(wells.front(),{},data,error,[]{return true;})&&data.wellId==0,"cancel clears output");
     check(!service.readWellPlotData(999999,{},data,error)&&data.wellId==0,"missing well");
     check(service.readWellPlotData(wells.front(),{},data,error),"read transaction released after failure");

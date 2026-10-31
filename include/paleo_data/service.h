@@ -152,6 +152,8 @@ struct WellPlotData {
 struct WellPlotOptions {
     bool processed=true;
     long long maxValues=8000000; // Preflight sample/interval budget, 1..64000000.
+    // Omitted groups are neither decoded nor charged against the value budget.
+    bool includeLogs=true, includeIntervals=true, includeMarkers=true, includePhotos=true;
 };
 struct ImportOptions {
     ParseOptions parsing;
