@@ -67,13 +67,14 @@ struct DataEntry {
     std::string detail;        // 供界面查看的摘要；业务代码不要通过拆分此字符串取数。
     long long count=0;         // 该类别的记录数，例如曲线样点数或本道层段数。
 };
-struct SourceEntry { long long id=0; std::string path, kind, status, message; long long bytes=0; };
+struct SourceEntry { long long id=0; std::string path, kind, status, message; long long bytes=0; bool active=true; };
 // Complete stored identity for index projections; separate from the original lightweight list contract.
 struct SourceIndexEntry {
     long long id=0;
     std::string path, storedPath, kind, status, message;
     long long bytes=0;
     std::string sha256;
+    bool active=true; // false retains import history; never project it as current data.
 };
 struct IssueEntry { long long id=0, sourceId=0; std::string code, message, originalText, sheet, resolution; int row=0; bool blocking=false, resolved=false; };
 // 通用的分页展示表。rows 是本页内容，totalRows 是总行数；表格值统一为文字。

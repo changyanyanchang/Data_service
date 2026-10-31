@@ -343,7 +343,12 @@ ParsedFile parseTextFile(const std::string& path,const ParseOptions& options,con
     if(file.peek(64).startsWith("# Petrel well head"))return parsePetrelCoordinates(std::move(out),file,options,cancelled);
     QTextStream input(&file);input.setEncoding(QStringConverter::Utf8);input.setAutoDetectUnicode(true);
     const QString extension=QFileInfo(file).suffix().toLower();
-    if(extension=="dat")return parseHorizon(std::move(out),input,options,cancelled);
+    // The file dispatcher recognizes Petrel surfaces by content, including
+    // extensionless exports. Preserve that decision here instead of treating
+    // each INLINE/XLINE row as an unmapped CSV cell.
+    const QRegularExpression horizonHeader("^\\s*INLINE\\s*:\\s*[+-]?[0-9]+\\s+XLINE\\s*:",QRegularExpression::CaseInsensitiveOption);
+    if(extension=="dat"||horizonHeader.match(QString::fromUtf8(file.peek(4096))).hasMatch())
+        return parseHorizon(std::move(out),input,options,cancelled);
     if(extension=="las")return parseLas(std::move(out),input,options,cancelled);
     if(extension=="txt"&&(QFileInfo(file).fileName().compare("wells2.txt",Qt::CaseInsensitive)==0||QFileInfo(file).absolutePath().contains(QStringLiteral("井坐标"))))return parseCoordinates(std::move(out),input,options,cancelled);
     const auto head=file.peek(4096);const QChar separator=head.contains('\t')&&!head.contains(',')?QChar('\t'):QChar(',');

@@ -122,14 +122,14 @@ bool DataService::readTable(const std::string& kind,long long id,long long offse
     QSqlQuery r;if(!store.exec(count,args,e,&r))return false;r.next();out.totalRows=r.value(0).toLongLong();args<<limit<<offset;if(!store.exec(sql+" LIMIT ? OFFSET ?",args,e,&r))return false;
     while(r.next()){std::vector<std::string> row;for(size_t i=0;i<out.columns.size();++i)row.push_back(s(r.value(int(i)).toString()));out.rows.push_back(std::move(row));}return true;
 }
-bool DataService::listSources(std::vector<SourceEntry>& out,std::string& e)const{out.clear();QSqlQuery r;if(!impl_->store.exec("SELECT id,original_path,kind,status,message,bytes FROM sources ORDER BY id DESC",{},e,&r))return false;while(r.next())out.push_back({r.value(0).toLongLong(),s(r.value(1).toString()),s(r.value(2).toString()),s(r.value(3).toString()),s(r.value(4).toString()),r.value(5).toLongLong()});return true;}
+bool DataService::listSources(std::vector<SourceEntry>& out,std::string& e)const{out.clear();QSqlQuery r;if(!impl_->store.exec("SELECT id,original_path,kind,status,message,bytes,active FROM sources ORDER BY id DESC",{},e,&r))return false;while(r.next())out.push_back({r.value(0).toLongLong(),s(r.value(1).toString()),s(r.value(2).toString()),s(r.value(3).toString()),s(r.value(4).toString()),r.value(5).toLongLong(),r.value(6).toBool()});return true;}
 bool DataService::listSourceIndexEntries(std::vector<SourceIndexEntry>& out,std::string& e)const{
     out.clear();QSqlQuery r;
-    if(!impl_->store.exec("SELECT id,original_path,stored_path,kind,status,message,bytes,hash FROM sources ORDER BY id DESC",{},e,&r))return false;
+    if(!impl_->store.exec("SELECT id,original_path,stored_path,kind,status,message,bytes,hash,active FROM sources ORDER BY id DESC",{},e,&r))return false;
     while(r.next()){
         SourceIndexEntry row;row.id=r.value(0).toLongLong();row.path=s(r.value(1).toString());row.storedPath=s(r.value(2).toString());
         row.kind=s(r.value(3).toString());row.status=s(r.value(4).toString());row.message=s(r.value(5).toString());
-        row.bytes=r.value(6).toLongLong();row.sha256=s(r.value(7).toString());out.push_back(std::move(row));
+        row.bytes=r.value(6).toLongLong();row.sha256=s(r.value(7).toString());row.active=r.value(8).toBool();out.push_back(std::move(row));
     }return true;
 }
 bool DataService::listIssues(bool unresolved,std::vector<IssueEntry>& out,std::string& e)const{out.clear();QSqlQuery r;if(!impl_->store.exec("SELECT id,source_id,code,message,original_text,sheet,resolution,row_num,blocking,resolved FROM issues WHERE (?=0 OR resolved=0) ORDER BY blocking DESC,id",{unresolved},e,&r))return false;while(r.next())out.push_back({r.value(0).toLongLong(),r.value(1).toLongLong(),s(r.value(2).toString()),s(r.value(3).toString()),s(r.value(4).toString()),s(r.value(5).toString()),s(r.value(6).toString()),r.value(7).toInt(),r.value(8).toBool(),r.value(9).toBool()});return true;}
