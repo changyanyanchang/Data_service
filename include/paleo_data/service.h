@@ -4,6 +4,7 @@
 #include "graph.h"
 #include <utility>
 #include "interpretation.h"
+#include "stratigraphic_framework.h"
 #include <memory>
 #include <cstdint>
 
@@ -453,6 +454,38 @@ public:
     bool listClusterings(std::vector<InterpretationClustering>& result, std::string& error) const;
     bool readClustering(const std::string& id, const std::string& version,
                         InterpretationClustering& result, std::string& error) const;
+    // ---- 统一地层层段体系（界面 / 父层间单元 / S1–S4 子层段）----
+    // 提交一个方案修订：自动由有序界面派生相邻父单元与四个子层段，校验失败整体拒绝；
+    // expectedHeadRevision 与当前头不一致即版本冲突。新修订影响到的子层段成果在同一事务
+    // 内标记 stale；无关层段不动。只读工程拒绝写入。
+    bool commitStratigraphicScheme(const StratigraphicScheme& scheme, const std::string& expectedHeadRevision,
+                                   StratigraphicScheme& committed, std::vector<FrameworkIssue>& issues,
+                                   std::string& error);
+    bool listStratigraphicSchemes(std::vector<StratigraphicSchemeSummary>& result, std::string& error) const;
+    bool listStratigraphicSchemeRevisions(const std::string& schemeId,
+                                          std::vector<StratigraphicSchemeRevisionSummary>& result,
+                                          std::string& error) const;
+    // revision 为空读取头修订。旧工程（无层段表）返回 false 且 error 说明“无层段方案”。
+    bool readStratigraphicScheme(const std::string& schemeId, const std::string& revision,
+                                 StratigraphicScheme& result, std::string& error) const;
+    // 以历史修订内容生成新头修订（回退不改写历史，不混用新旧分段）。
+    bool restoreStratigraphicSchemeRevision(const std::string& schemeId, const std::string& revision,
+                                            const std::string& expectedHeadRevision,
+                                            StratigraphicScheme& committed, std::string& error);
+    // 按 SubIntervalId 查询单井实际深度范围（使用方案头或指定修订）。
+    bool readWellSubIntervalRange(const std::string& schemeId, const std::string& revision, long long wellId,
+                                  const SubIntervalId& subInterval, WellSubIntervalRange& result,
+                                  std::string& error) const;
+    // 登记子层段成果；必须引用方案中存在的 SubIntervalId（或 aggregate 父单元，或 legacy 标签）。
+    bool bindSubIntervalResult(const SubIntervalResultBinding& binding, SubIntervalResultBinding& stored,
+                               std::string& error);
+    // subInterval 为空时列出方案全部成果。
+    bool listSubIntervalResults(const std::string& schemeId, const SubIntervalId& subInterval,
+                                std::vector<SubIntervalResultBinding>& result, std::string& error) const;
+    // 预演：若提交 candidate，哪些子层段与已登记成果会受影响（不写库）。
+    bool previewStratigraphicImpact(const StratigraphicScheme& candidate, std::vector<SubIntervalId>& subIntervals,
+                                    std::vector<SubIntervalResultBinding>& affectedResults,
+                                    std::string& error) const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
