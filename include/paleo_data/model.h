@@ -182,9 +182,12 @@ struct TimeDepthTable {
     std::string timeUnit; // 时间单位，如 ms；空表示未知
     std::string timeType; // OWT 或 TWT；空表示未知
     std::string timeReference; // 时间零点或参考面；空表示未知
+    // 已确认的导出符号约定："negated" = 原文件时间按海拔带符号（基准面以上
+    // 正、以下负），读取时已统一取负（标准域：基准面以下为正）；空 = 按原值。
+    std::string timeSign;
     std::vector<TimeDepthPoint> depthTimePairs; // 时深配对采样点
     std::string sourceFile; // 原始时深文件路径
-    std::string sourceSheet; // 原始工作表名
+    std::string sourceSheet; // 原始时深文件工作表名
     // Petrel checkshots 可同时提供沿井 X/Y/Z；Z 的单位、方向、基准独立于 MD。
     DepthInfo positionDepthInfo;
     std::string coordinateSystem;
