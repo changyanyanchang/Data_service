@@ -36,8 +36,10 @@ bool DataService::readWellPlotData(long long well, const WellPlotOptions& option
     if(!store.exec("SELECT depth_json FROM wells WHERE id=?",{well},error,&row)||!row.next())return false;
     next.defaultDepthInfo=readDepth(object(row.value(0).toString()));row.finish();
     std::vector<DataEntry> logs,tracks,markers,photos;
-    if(!listData("curves",well,logs,error)||!listData("intervals",well,tracks,error)||
-       !listData("markers",well,markers,error)||!listData("core_photos",well,photos,error))return false;
+    if((options.includeLogs&&!listData("curves",well,logs,error))||
+       (options.includeIntervals&&!listData("intervals",well,tracks,error))||
+       (options.includeMarkers&&!listData("markers",well,markers,error))||
+       (options.includePhotos&&!listData("core_photos",well,photos,error)))return false;
     long long remaining=options.maxValues;
     const auto reserve=[&](long long count){if(count<0||count>remaining){error="Well plot exceeds value budget";return false;}remaining-=count;return true;};
     for(const auto& entries:{&logs,&tracks,&markers,&photos})for(const auto& entry:*entries)if(!reserve(entry.count))return false;
