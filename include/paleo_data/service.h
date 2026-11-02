@@ -346,6 +346,13 @@ public:
                                    const std::string& timeType,
                                    const std::string& timeReference, bool negateTimes,
                                    std::string& error);
+    // Atomic source-family confirmation plus an optional seismic volume's shared
+    // datum. Time-depth values stay raw; volume sample coordinates are never rescaled.
+    // An existing OWT volume is rejected rather than reinterpreted as TWT.
+    bool confirmTimeDepthAlignment(const std::vector<long long>& timeDepthIds,
+                                   const std::string& timeUnit, const std::string& timeType,
+                                   const std::string& timeReference, bool negateTimes,
+                                   long long volumeId, std::string& error);
     bool readTrajectory(long long id, TrajectorySurvey& result, std::string& error) const;
     // 每个图道返回照片数组，路径已解析为可访问的完整路径；深度未知时为 Missing。
     bool readCorePhotoTrack(long long id, CorePhotoTrack& result, std::string& error) const;

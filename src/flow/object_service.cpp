@@ -91,30 +91,4 @@ bool DataService::assignTimeDepthWell(long long id,long long wellId,std::string&
     TimeDepthTable table;if(!readTimeDepth(id,table,e))return false;if(wellId<0){e="井编号无效";return false;}if(wellId){WellInfo w;if(!readWellInfo(wellId,w,e))return false;}
     auto& st=impl_->store;Transaction tx(st,e);if(!tx.active)return false;return st.exec("UPDATE well_objects SET well_id=? WHERE id=? AND kind='time_depth'",{wellId?QVariant(wellId):QVariant(),id},e)&&st.exec("INSERT INTO changes(kind,entity_id,description) VALUES('time_depth',?,?)",{id,QString("人工确认归井：%1，数值与来源不变").arg(wellId)},e)&&tx.commit(e);
 }
-bool DataService::confirmTimeDepthSemantics(long long timeDepthId,const std::string& timeUnit,const std::string& timeType,const std::string& timeReference,bool negateTimes,std::string& e){
-    if(timeUnit!="ms"&&timeUnit!="s"){e="时间单位须确认为 ms 或 s";return false;}
-    if(timeType!="TWT"&&timeType!="OWT"){e="时间类型须确认为 TWT 或 OWT";return false;}
-    if(timeReference.empty()){e="时间基准不能为空（如 MSL/海平面）";return false;}
-    QSqlQuery r;if(!impl_->store.exec("SELECT source_id FROM well_objects WHERE id=? AND kind='time_depth'",{timeDepthId},e,&r))return false;
-    if(!r.next()||r.value(0).isNull()){e="时深关系不存在";return false;}
-    const long long sourceId=r.value(0).toLongLong();
-    QSqlQuery all;if(!impl_->store.exec("SELECT id,payload FROM well_objects WHERE source_id=? AND kind='time_depth'",{sourceId},e,&all))return false;
-    std::vector<std::pair<long long,QString>> updates;
-    while(all.next()){
-        auto o=object(all.value(1).toString());
-        o["timeUnit"]=q(timeUnit);o["timeType"]=q(timeType);o["timeReference"]=q(timeReference);
-        o["timeSign"]=negateTimes?QStringLiteral("negated"):QString();
-        updates.push_back({all.value(0).toLongLong(),json(o)});
-    }
-    if(updates.empty()){e="时深关系不存在";return false;}
-    auto& st=impl_->store;Transaction tx(st,e);if(!tx.active)return false;
-    const QString note=QString("人工确认时深口径：%1/%2/%3，%4；原始点值保留")
-        .arg(q(timeType),q(timeUnit),q(timeReference),
-             negateTimes?QStringLiteral("符号按导出口径取反"):QStringLiteral("符号按原值"));
-    for(const auto& u:updates)if(!st.exec("UPDATE well_objects SET payload=? WHERE id=? AND kind='time_depth'",{u.second,u.first},e))return false;
-    if(!st.exec("INSERT INTO changes(kind,entity_id,description) VALUES('time_depth',?,?)",{timeDepthId,note},e))return false;
-    // 一份导出一份口径：同源的时深口径类复核问题随确认消解（多井同源共享）。
-    if(!st.exec("UPDATE issues SET resolved=1,resolution=? WHERE source_id=? AND resolved=0 AND code IN ('TIME_UNIT_UNKNOWN','TIME_REFERENCE_UNKNOWN','TIME_SIGN_REVIEW')",{note,sourceId},e))return false;
-    return tx.commit(e);
-}
 }

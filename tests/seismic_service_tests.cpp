@@ -52,8 +52,28 @@ void projectCoordinates(const QTemporaryDir& temp){
     check(source.open(QIODevice::ReadOnly)&&source.readAll()==original,"external SEG-Y is unchanged");
 }
 }
+static void pairedTimeDepth(const QTemporaryDir& temp){
+    DataService service;std::string error;check(service.createProject(utf8(temp.path()+"/paired"),"Pairing",error),error);
+    std::vector<long long> ids;
+    for(const auto& name:{QByteArray("A"),QByteArray("B")}){
+        const auto file=temp.filePath("td-"+QString::fromUtf8(name));QFile raw(file);check(raw.open(QIODevice::WriteOnly),"TD fixture");
+        raw.write("# Petrel checkshots format\n# Unit in depth: m\nVERSION 1\nBEGIN HEADER\nX\nY\nZ\nTWT picked\nMD\nWell\nEND HEADER\n1 2 -100 -50 110 "+name+"\n1 2 -200 -100 210 "+name+"\n");raw.close();
+        ImportReport report;check(service.importFile(utf8(file),{},report,error),error);
+    }
+    std::vector<DataEntry> entries;check(service.listData("time_depth",0,entries,error)&&entries.size()==2,error);for(const auto& entry:entries)ids.push_back(entry.id);
+    const auto file=temp.filePath("paired.sgy");fixture(file);const auto volumeId=importVolume(service,file,error);
+    check(!service.confirmTimeDepthAlignment(ids,"ms","TWT","shared zero",true,volumeId+999,error),"missing volume rejects whole pairing");
+    TimeDepthTable table;check(service.readTimeDepth(ids[0],table,error)&&table.timeUnit.empty()&&table.depthTimePairs[0].timeValue==-50,"failed pairing leaves source values and declarations unchanged");
+    check(service.confirmTimeDepthAlignment(ids,"ms","TWT","shared zero",true,volumeId,error),error);
+    for(auto id:ids)check(service.readTimeDepth(id,table,error)&&table.timeReference=="shared zero"&&table.depthTimePairs[0].timeValue==50,"both source families confirmed");
+    SeismicVolume volume;check(service.readVolume(volumeId,volume,error)&&volume.sampling.timeType=="TWT"&&volume.sampling.timeReference=="shared zero"&&volume.sampling.sampleInterval==2,"volume datum paired without resampling");
+    check(service.confirmTimeDepthAlignment(ids,"ms","TWT","shared zero",true,volumeId,error),error);
+    check(service.readTimeDepth(ids[0],table,error)&&table.depthTimePairs[0].timeValue==50,"repeat pairing does not negate twice");
+    check(service.confirmTimeDepthSemantics(ids[0],"ms","TWT","shared zero",false,error),error);
+    check(service.readTimeDepth(ids[0],table,error)&&table.depthTimePairs[0].timeValue==-50,"raw source values remain intact");
+}
 int main(int argc,char**argv){QCoreApplication app(argc,argv);QCoreApplication::setApplicationName("paleo-data-seismic-tests");try{
-    QTemporaryDir temp;check(temp.isValid(),"temporary directory");projectCoordinates(temp);std::string error;DataService service;check(service.createProject(utf8(temp.path()+"/project"),"Seismic tests",error),error);
+    QTemporaryDir temp;check(temp.isValid(),"temporary directory");projectCoordinates(temp);pairedTimeDepth(temp);std::string error;DataService service;check(service.createProject(utf8(temp.path()+"/project"),"Seismic tests",error),error);
     const QString path=temp.path()+"/step2.sgy";fixture(path);const auto id=importVolume(service,path,error);SeismicTimeSliceResult slice;
     check(!service.readTimeSlice(id,104,{},slice,error)&&slice.amplitudes.empty(),"unknown reference rejected");confirm(service,id,error);
     TimeSliceReadOptions timeOptions;timeOptions.maxInlineCount=3;timeOptions.maxCrosslineCount=4;
