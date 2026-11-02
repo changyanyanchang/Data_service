@@ -348,9 +348,20 @@ public:
     bool readDocument(long long sourceId, std::string& text, std::string& error) const;
     bool relocateSource(long long sourceId, const std::string& path, std::string& error);
     bool readSampleTable(long long tableId, SampleTable& result, std::string& error) const;
-    // 返回完整时深点数组及深度/时间约定；保留负时间和未知单位，不自动换算。
+    // 返回完整时深点数组及深度/时间约定；保留负时间和未知单位，不自动换算
+    //（已确认 negated 符号约定的来源按确认口径交付，见 confirmTimeDepthSemantics）。
     bool readTimeDepth(long long id, TimeDepthTable& result, std::string& error) const;
     bool assignTimeDepthWell(long long id, long long wellId, std::string& error); // 0 clears association; points and source remain unchanged
+    // 人工确认一份时深导出的时间口径（单位 ms/s、单双程 TWT/OWT、时间基准、
+    // 符号约定 negateTimes=原文件按海拔带符号需取反），应用到该时深所属来源的
+    // 全部时深关系（一份导出一份口径）。数据库原始点值不动——确认只写元数据，
+    // 读取按确认口径交付；同源的时深口径类复核问题（TIME_UNIT_UNKNOWN/
+    // TIME_REFERENCE_UNKNOWN/TIME_SIGN_REVIEW）随之消解。宿主确认先例：
+    // saveCurveUnit / ParseOptions.comprehensiveWellMetreDepth。
+    bool confirmTimeDepthSemantics(long long timeDepthId, const std::string& timeUnit,
+                                   const std::string& timeType,
+                                   const std::string& timeReference, bool negateTimes,
+                                   std::string& error);
     bool readTrajectory(long long id, TrajectorySurvey& result, std::string& error) const;
     // 每个图道返回照片数组，路径已解析为可访问的完整路径；深度未知时为 Missing。
     bool readCorePhotoTrack(long long id, CorePhotoTrack& result, std::string& error) const;
