@@ -1,4 +1,5 @@
 #include "store/project_store.h"
+#include "planar_coordinates.h"
 #include <QJsonDocument>
 #include <QFileInfo>
 #include <cmath>
@@ -41,7 +42,7 @@ bool DataService::readVolume(long long id,SeismicVolume& v,std::string& e)const{
     v={};QSqlQuery r;if(!impl_->store.exec("SELECT name,path,format,amplitude_unit,geometry,sampling FROM volumes WHERE id=?",{id},e,&r))return false;if(!r.next()){e="地震体不存在";return false;}
     v.volumeId=int(id);v.volumeName=s(r.value(0).toString());v.dataFile=s(impl_->store.absolutePath(r.value(1).toString()));v.fileFormat=s(r.value(2).toString());v.amplitudeUnit=s(r.value(3).toString());auto g=object(r.value(4).toString()),a=object(r.value(5).toString());
     v.geometry.traceCount=g["traceCount"].toInteger(-1);v.geometry.inlineMin=g["inlineMin"].toInt();v.geometry.inlineMax=g["inlineMax"].toInt();v.geometry.crosslineMin=g["crosslineMin"].toInt();v.geometry.crosslineMax=g["crosslineMax"].toInt();v.geometry.coordinateSystem=s(g["crs"].toString());v.geometry.coordinateUnit=s(g["unit"].toString());
-    v.sampling.sampleCount=a["sampleCount"].toInt();v.sampling.firstTime=jnumber(a["firstTime"]);v.sampling.sampleInterval=jnumber(a["sampleInterval"]);v.sampling.timeUnit=s(a["timeUnit"].toString());v.sampling.timeType=s(a["timeType"].toString());v.sampling.timeReference=s(a["timeReference"].toString());return true;
+    v.sampling.sampleCount=a["sampleCount"].toInt();v.sampling.firstTime=jnumber(a["firstTime"]);v.sampling.sampleInterval=jnumber(a["sampleInterval"]);v.sampling.timeUnit=s(a["timeUnit"].toString());v.sampling.timeType=s(a["timeType"].toString());v.sampling.timeReference=s(a["timeReference"].toString());return readPlanarCoordinates(*this,v.geometry.coordinateSystem,v.geometry.coordinateUnit,e);
 }
 bool DataService::saveVolume(long long id,const SeismicVolume& v,std::string& e){
     SeismicVolume old;if(!readVolume(id,old,e))return false;if(v.volumeName.empty()){e="地震体名称不能为空";return false;}if(!v.traces.empty()){e="此接口只保存元信息；地震振幅保持外部存储";return false;}
@@ -55,7 +56,7 @@ bool DataService::saveVolume(long long id,const SeismicVolume& v,std::string& e)
 bool DataService::readHorizon(long long id,long long offset,int limit,SeismicHorizon& h,std::string& e)const{
     h={};if(offset<0||limit<1||limit>100000){e="层位分页范围无效";return false;}QSqlQuery r;if(!impl_->store.exec("SELECT h.name,h.volume_id,h.crs,h.unit,h.time_unit,h.time_type,h.time_reference,s.stored_path FROM horizons h LEFT JOIN sources s ON s.id=h.source_id WHERE h.id=?",{id},e,&r))return false;if(!r.next()){e="地震层位不存在";return false;}
     h.horizonName=s(r.value(0).toString());h.parentVolumeId=r.value(1).toInt();h.coordinateSystem=s(r.value(2).toString());h.coordinateUnit=s(r.value(3).toString());h.timeUnit=s(r.value(4).toString());h.timeType=s(r.value(5).toString());h.timeReference=s(r.value(6).toString());h.sourceFile=s(impl_->store.absolutePath(r.value(7).toString()));
-    if(!impl_->store.exec("SELECT inline_no,crossline_no,x,y,z FROM horizon_points WHERE horizon_id=? ORDER BY seq,id LIMIT ? OFFSET ?",{id,limit,offset},e,&r))return false;while(r.next())h.points.push_back({r.value(0).toInt(),r.value(1).toInt(),value(r.value(2)),value(r.value(3)),value(r.value(4))});return true;
+    if(!impl_->store.exec("SELECT inline_no,crossline_no,x,y,z FROM horizon_points WHERE horizon_id=? ORDER BY seq,id LIMIT ? OFFSET ?",{id,limit,offset},e,&r))return false;while(r.next())h.points.push_back({r.value(0).toInt(),r.value(1).toInt(),value(r.value(2)),value(r.value(3)),value(r.value(4))});return readPlanarCoordinates(*this,h.coordinateSystem,h.coordinateUnit,e);
 }
 bool DataService::saveHorizonInfo(long long id,const SeismicHorizon& h,std::string& e){
     if(h.horizonName.empty()){e="层位名称不能为空";return false;}SeismicHorizon old;if(!readHorizon(id,0,1,old,e))return false;

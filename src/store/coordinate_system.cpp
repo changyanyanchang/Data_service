@@ -54,10 +54,8 @@ bool normalizeStoredCoordinates(ProjectStore& store,std::string& error){
     std::vector<WellRow> wells;
     while(rows.next()){
         const auto crs=rows.value(1).toString();const auto resolved=declaredEpsg(crs);
-        const bool positioned=!rows.value(3).isNull()&&!rows.value(4).isNull();
         QString next;
         if(isEpsg(resolved)&&canonicalCrs(crs)!=resolved)next=resolved;
-        else if(crs.trimmed().isEmpty()&&positioned)next=defaultProjectCrs();
         if(next.isEmpty())continue;
         auto unit=rows.value(2).toString().trimmed();if(unit.isEmpty())unit=QStringLiteral("m");
         wells.push_back({rows.value(0).toLongLong(),next,unit});

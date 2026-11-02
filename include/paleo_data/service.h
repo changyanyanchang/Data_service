@@ -41,7 +41,7 @@ struct WellHeadRange {
 };
 
 // 工区平面范围 = 全部井口点矩形 ∪ 全部地震体范围矩形。
-// 只有两块都在、且坐标约定已确认并一致时才合并；否则 merged.valid=false 并说明原因，
+// 缺声明的数据先继承工区约定；两块坐标约定一致时合并，否则 merged.valid=false 并说明原因，
 // 绝不把不同坐标系或单位的数值凑进同一个矩形。单一来源存在时按 partial 给出该块矩形。
 // status：complete / partial（只有一块）/ unavailable（两块都没有）/
 //         conventions-unconfirmed（两块都在但约定未确认）/ conventions-mismatch（声明冲突）。
@@ -101,7 +101,8 @@ struct CurveSlice {
 };
 
 // Plot input keeps groups, source IDs and conventions separate. No file reparse,
-// interpolation, implicit CRS inheritance or coordinate transformation is performed.
+// interpolation or coordinate transformation is performed. Missing planar CRS/unit
+// declarations inherit the selected project convention; explicit declarations win.
 struct ProjectCoordinates { std::string coordinateSystem, coordinateUnit; };
 struct ProjectCrsCandidate {
     long long sourceId=0, objectId=0;
@@ -245,6 +246,9 @@ public:
     void closeProject();
     std::string projectPath() const;
     std::string projectName() const;
+    // New projects default to EPSG:32650 / m. Explicit import/manual selections win.
+    // Well, volume, horizon and section reads inherit this convention only when absent.
+    // Raw source coordinates and stored declarations remain unchanged.
     std::string projectCrs() const;
     std::string projectCrsUnit() const;
     bool setProjectCrs(const std::string& epsg, const std::string& unit, std::string& e);

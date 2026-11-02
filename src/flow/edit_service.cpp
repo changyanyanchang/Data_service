@@ -1,4 +1,5 @@
 #include "store/project_store.h"
+#include "planar_coordinates.h"
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QSqlError>
@@ -96,6 +97,6 @@ bool DataService::saveSection(long long& id,const SeismicSection& a,std::string&
     for(size_t i=0;ok&&i<a.pathPoints.size();++i)ok=st.exec("INSERT INTO section_points VALUES(?,?,?,?)",{id,qlonglong(i),a.pathPoints[i].x,a.pathPoints[i].y},e);
     ok=ok&&st.commit(e);if(!ok)st.rollback();return ok;
 }
-bool DataService::readSection(long long id,SeismicSection& a,std::string& e)const{a={};QSqlQuery r;if(!impl_->store.exec("SELECT name,volume_id,crs,unit FROM sections WHERE id=?",{id},e,&r))return false;if(!r.next()){e="剖面不存在";return false;}a.sectionName=s(r.value(0).toString());a.parentVolumeId=r.value(1).toInt();a.coordinateSystem=s(r.value(2).toString());a.coordinateUnit=s(r.value(3).toString());if(!impl_->store.exec("SELECT x,y FROM section_points WHERE section_id=? ORDER BY seq",{id},e,&r))return false;while(r.next())a.pathPoints.push_back({value(r.value(0)),value(r.value(1))});return true;}
+bool DataService::readSection(long long id,SeismicSection& a,std::string& e)const{a={};QSqlQuery r;if(!impl_->store.exec("SELECT name,volume_id,crs,unit FROM sections WHERE id=?",{id},e,&r))return false;if(!r.next()){e="剖面不存在";return false;}a.sectionName=s(r.value(0).toString());a.parentVolumeId=r.value(1).toInt();a.coordinateSystem=s(r.value(2).toString());a.coordinateUnit=s(r.value(3).toString());if(!impl_->store.exec("SELECT x,y FROM section_points WHERE section_id=? ORDER BY seq",{id},e,&r))return false;while(r.next())a.pathPoints.push_back({value(r.value(0)),value(r.value(1))});return readPlanarCoordinates(*this,a.coordinateSystem,a.coordinateUnit,e);}
 bool DataService::backupDatabase(const std::string& dest,std::string& e)const{if(QFileInfo::exists(q(dest))){e="备份目标已存在，请选择新文件";return false;}return impl_->store.exec("VACUUM INTO ?",{q(dest)},e);}
 }
