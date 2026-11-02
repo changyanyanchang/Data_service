@@ -3,6 +3,8 @@
 #include "paleo_data/service.h"
 #include "segy_reader.h"
 #include "store/project_store.h"
+#include "store/horizon_grid_sampler.h"
+#include <memory>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -17,107 +19,30 @@ namespace {
 
 bool isFiniteVal(double v) { return std::isfinite(v); }
 
-long long packIlXl(int il, int xl)
-{
-    return (static_cast<long long>(il) << 32) | static_cast<unsigned int>(xl);
-}
-
 struct HorizonSurfaceIndex {
-    long long horizonId = 0;
-    std::string name;
-    double timeFactor = 1.0; // s -> 1000, ms -> 1
-    int ilMin = std::numeric_limits<int>::max(), ilMax = std::numeric_limits<int>::min();
-    int xlMin = std::numeric_limits<int>::max(), xlMax = std::numeric_limits<int>::min();
-    std::unordered_map<long long, double> gridTwtMs; // (il, xl) -> positive TWT(ms)
-    struct XYPt { int il = 0, xl = 0; double x = Missing, y = Missing, twtMs = Missing; };
-    std::vector<XYPt> pts;
-
-    bool load(const ProjectStore& st, long long hid,
-              int filterIlMin, int filterIlMax, int filterXlMin, int filterXlMax,
-              std::string& error)
-    {
-        horizonId = hid;
-        QSqlQuery infoQuery;
-        if (!st.exec("SELECT name, time_unit FROM horizons WHERE id=?", {hid}, error, &infoQuery) || !infoQuery.next()) {
-            if (error.empty()) error = "地震层位不存在: " + std::to_string(hid);
-            return false;
+    std::string name;double scale=1.;std::unique_ptr<GridSampler> grid;
+    int ilMin=std::numeric_limits<int>::min(),ilMax=std::numeric_limits<int>::max();
+    int xlMin=std::numeric_limits<int>::min(),xlMax=std::numeric_limits<int>::max();
+    bool load(const DataService& ds,const ProjectStore& st,const SeismicVolume& volume,long long id,
+              const SeismicHorizonWindowQuery& query,std::string& error){
+        SeismicHorizon h;if(!ds.readHorizon(id,0,1,h,error))return false;
+        if((h.parentVolumeId&&h.parentVolumeId!=query.volumeId&&query.volumeId>0)||
+           h.coordinateSystem!=volume.geometry.coordinateSystem||h.coordinateUnit!=volume.geometry.coordinateUnit){
+            error="层位与所选地震体的归属或坐标约定不同";return false;
         }
-        name = s(infoQuery.value(0).toString());
-        const std::string tunit = s(infoQuery.value(1).toString().trimmed());
-        timeFactor = (tunit == "s" || tunit == "S") ? 1000.0 : 1.0;
-
-        QString sql = "SELECT inline_no, crossline_no, x, y, z FROM horizon_points WHERE horizon_id=?";
-        QVariantList args{hid};
-        if (filterIlMin <= filterIlMax && filterIlMin > std::numeric_limits<int>::min() / 2 &&
-            filterIlMax < std::numeric_limits<int>::max() / 2) {
-            sql += " AND inline_no BETWEEN ? AND ?";
-            args << (filterIlMin - 4) << (filterIlMax + 4);
+        if(!h.timeReference.empty()&&!volume.sampling.timeReference.empty()&&h.timeReference!=volume.sampling.timeReference){
+            error="层位与地震体的时间基准不同";return false;
         }
-        if (filterXlMin <= filterXlMax && filterXlMin > std::numeric_limits<int>::min() / 2 &&
-            filterXlMax < std::numeric_limits<int>::max() / 2) {
-            sql += " AND crossline_no BETWEEN ? AND ?";
-            args << (filterXlMin - 4) << (filterXlMax + 4);
+        const auto unit=h.timeUnit.empty()?(volume.sampling.timeUnit.empty()?query.undeclaredTimeUnit:volume.sampling.timeUnit):h.timeUnit;
+        const auto volumeType=volume.sampling.timeType.empty()?query.undeclaredTimeType:volume.sampling.timeType;
+        const auto type=h.timeType.empty()?volumeType:h.timeType;
+        if(volumeType!="TWT"||(unit!="ms"&&unit!="s")||(type!="TWT"&&type!="OWT")){
+            error="地震层段读取需要明确的时间单位及 TWT 地震体约定";return false;
         }
-
-        QSqlQuery qPts;
-        if (!st.exec(sql, args, error, &qPts)) return false;
-        while (qPts.next()) {
-            const int il = qPts.value(0).toInt();
-            const int xl = qPts.value(1).toInt();
-            const double x = value(qPts.value(2));
-            const double y = value(qPts.value(3));
-            const double z = value(qPts.value(4));
-            if (!isFiniteVal(z)) continue;
-            const double twt = std::abs(z) * timeFactor;
-            if (il != 0 || xl != 0) {
-                gridTwtMs[packIlXl(il, xl)] = twt;
-                ilMin = std::min(ilMin, il);
-                ilMax = std::max(ilMax, il);
-                xlMin = std::min(xlMin, xl);
-                xlMax = std::max(xlMax, xl);
-            }
-            pts.push_back({il, xl, x, y, twt});
-        }
-        return !pts.empty();
+        name=h.horizonName;scale=(unit=="s"?1000.:1.)*(type=="OWT"?2.:1.);
+        grid=std::make_unique<GridSampler>(st,id,64);return grid->prepare(error);
     }
-
-    double sampleAt(int il, int xl, double x, double y) const
-    {
-        auto it = gridTwtMs.find(packIlXl(il, xl));
-        if (it != gridTwtMs.end()) return it->second;
-
-        // 尝试周围 2 步以内的网格邻域插值
-        double wSum = 0.0, vSum = 0.0;
-        for (int dil = -2; dil <= 2; ++dil) {
-            for (int dxl = -2; dxl <= 2; ++dxl) {
-                if (dil == 0 && dxl == 0) continue;
-                auto nit = gridTwtMs.find(packIlXl(il + dil, xl + dxl));
-                if (nit != gridTwtMs.end()) {
-                    const double w = 1.0 / double(dil * dil + dxl * dxl);
-                    wSum += w;
-                    vSum += w * nit->second;
-                }
-            }
-        }
-        if (wSum > 0.0) return vSum / wSum;
-
-        // 若有平面 XY，按最近邻 IDW 插值
-        if (isFiniteVal(x) && isFiniteVal(y) && !pts.empty()) {
-            double bestD2 = std::numeric_limits<double>::infinity();
-            double bestTwt = Missing;
-            for (const auto& p : pts) {
-                if (!isFiniteVal(p.x) || !isFiniteVal(p.y)) continue;
-                const double dx = p.x - x, dy = p.y - y;
-                const double d2 = dx * dx + dy * dy;
-                if (d2 < bestD2) {
-                    bestD2 = d2;
-                    bestTwt = p.twtMs;
-                }
-            }
-            if (bestD2 <= 500.0 * 500.0) return bestTwt;
-        }
-        return Missing;
-    }
+    double sampleAt(int il,int xl,std::string& error){return grid->sample(il,xl,error)*scale;}
 };
 
 struct TdDepthConverter {
@@ -268,6 +193,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
 {
     error.clear();
     result = {};
+    SeismicHorizonWindowResult next;
     auto& st = impl_->store;
     if (!st.db.isOpen()) { error = "请先打开工区"; return false; }
 
@@ -277,6 +203,8 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
     };
     if (isCancelled()) return false;
 
+    if(!st.exec("BEGIN",{},error))return false;
+    struct Snapshot{const ProjectStore& store;~Snapshot(){std::string ignored;store.exec("ROLLBACK",{},ignored);}}snapshot{st};
     // 1. 解析地震体 ID（volumeId <= 0 时自动选工区第一个地震体）
     long long volumeId = query.volumeId;
     if (volumeId <= 0) {
@@ -287,7 +215,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
     }
     SeismicVolume volume;
     if (!readVolume(volumeId, volume, error)) return false;
-    result.volumeId = volumeId;
+    next.volumeId = volumeId;
 
     // 2. 解析目标层位/四等分小层（T70-T72-S1..S4 或 T70-T72）及顶底层位资源 ID 与比例区间 [fTop, fBot]
     long long topHorizonId = query.target.topHorizonId;
@@ -300,8 +228,8 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
     StratigraphicScheme scheme;
     std::string schemeErr;
     if (readStratigraphicScheme(schemeId, query.target.revision, scheme, schemeErr)) {
-        result.schemeId = scheme.id;
-        result.schemeRevision = scheme.revision;
+        next.schemeId = scheme.id;
+        next.schemeRevision = scheme.revision;
 
         const StratigraphicSubInterval* sub = nullptr;
         const StratigraphicInterval* iv = nullptr;
@@ -312,7 +240,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
         if (sub) {
             iv = fw::findInterval(scheme, sub->interval);
             subIndex = sub->index;
-            result.subIntervalId = sub->id;
+            next.subIntervalId = sub->id;
         } else {
             if (!query.target.intervalId.empty())
                 iv = fw::resolveInterval(scheme, query.target.intervalId.value);
@@ -320,13 +248,13 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
                 iv = fw::resolveInterval(scheme, query.target.unitName);
             if (iv && subIndex >= 1 && subIndex <= SubIntervalCount) {
                 for (const auto* s : fw::subIntervalsOf(scheme, iv->id)) {
-                    if (s->index == subIndex) { sub = s; result.subIntervalId = s->id; break; }
+                    if (s->index == subIndex) { sub = s; next.subIntervalId = s->id; break; }
                 }
             }
         }
 
         if (iv) {
-            result.intervalId = iv->id;
+            next.intervalId = iv->id;
             const auto* tb = fw::findBoundary(scheme, iv->top);
             const auto* bb = fw::findBoundary(scheme, iv->bottom);
             if (tb) {
@@ -392,55 +320,21 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
         return false;
     }
 
-    // 3. 根据查询域确定层位点预过滤范围并加载顶底层位网格
-    int filterIlMin = std::numeric_limits<int>::min(), filterIlMax = std::numeric_limits<int>::max();
-    int filterXlMin = std::numeric_limits<int>::min(), filterXlMax = std::numeric_limits<int>::max();
-    if (query.domainKind == HorizonSpatialDomainKind::InlineSection) {
-        filterIlMin = filterIlMax = query.fixedLineNumber;
-        if (query.crosslineMin <= query.crosslineMax && query.crosslineMax > 0) {
-            filterXlMin = query.crosslineMin;
-            filterXlMax = query.crosslineMax;
-        }
-    } else if (query.domainKind == HorizonSpatialDomainKind::CrosslineSection) {
-        filterXlMin = filterXlMax = query.fixedLineNumber;
-        if (query.inlineMin <= query.inlineMax && query.inlineMax > 0) {
-            filterIlMin = query.inlineMin;
-            filterIlMax = query.inlineMax;
-        }
-    } else if (query.domainKind == HorizonSpatialDomainKind::InlineCrosslineBox) {
-        if (query.inlineMin <= query.inlineMax && query.inlineMax > 0) {
-            filterIlMin = query.inlineMin;
-            filterIlMax = query.inlineMax;
-        }
-        if (query.crosslineMin <= query.crosslineMax && query.crosslineMax > 0) {
-            filterXlMin = query.crosslineMin;
-            filterXlMax = query.crosslineMax;
-        }
-    } else if (query.domainKind == HorizonSpatialDomainKind::ArbitraryTraceList && !query.explicitTraces.empty()) {
-        filterIlMin = filterXlMin = std::numeric_limits<int>::max();
-        filterIlMax = filterXlMax = std::numeric_limits<int>::min();
-        for (const auto& [il, xl] : query.explicitTraces) {
-            filterIlMin = std::min(filterIlMin, il);
-            filterIlMax = std::max(filterIlMax, il);
-            filterXlMin = std::min(filterXlMin, xl);
-            filterXlMax = std::max(filterXlMax, xl);
-        }
-    }
-
-    HorizonSurfaceIndex topSurf, botSurf;
-    if (!topSurf.load(st, topHorizonId, filterIlMin, filterIlMax, filterXlMin, filterXlMax, error) ||
-        !botSurf.load(st, bottomHorizonId, filterIlMin, filterIlMax, filterXlMin, filterXlMax, error))
-        return false;
+    // The same indexed, signed, null-preserving surface sampler as section overlays.
+    HorizonSurfaceIndex topSurf,botSurf;
+    auto boundQuery=query;boundQuery.volumeId=volumeId;
+    if(!topSurf.load(*this,st,volume,topHorizonId,boundQuery,error)||
+       !botSurf.load(*this,st,volume,bottomHorizonId,boundQuery,error))return false;
 
     if (unitDisplay.empty()) {
         unitDisplay = topSurf.name + "-" + botSurf.name + (subIndex >= 1 ? ("-S" + std::to_string(subIndex)) : "");
     }
-    result.unitDisplayName = unitDisplay;
-    result.subIndex = subIndex;
-    result.fractionTop = fTop;
-    result.fractionBottom = fBot;
-    result.sampleMode = query.sampleMode;
-    result.fixedSampleCount = (query.sampleMode == HorizonWindowSampleMode::ResampledFixedCount)
+    next.unitDisplayName = unitDisplay;
+    next.subIndex = subIndex;
+    next.fractionTop = fTop;
+    next.fractionBottom = fBot;
+    next.sampleMode = query.sampleMode;
+    next.fixedSampleCount = (query.sampleMode == HorizonWindowSampleMode::ResampledFixedCount)
         ? std::max(1, query.resampledSampleCount)
         : 0;
 
@@ -454,16 +348,21 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
         error = "地震体缺少规则 Inline/Crossline 测线网格，无法按层位网格提取窗口";
         return false;
     }
-    result.sampleIntervalMs = facts.sampleInterval;
-    result.timeUnit = "ms";
-    result.depthUnit = "m";
+    next.sampleIntervalMs = facts.sampleInterval;
+    next.timeUnit = "ms";
+    next.depthUnit = "m";
 
     // 5. 生成目标 (inline, crossline) 道列表
     std::vector<std::pair<int, int>> targetTraces;
+    const auto appendTarget=[&](int il,int xl){
+      if(targetTraces.size()>=65536){error="层位窗口超过道数预算，请增大测线步长或缩小范围";return false;}
+      targetTraces.push_back({il,xl});return true;
+    };
     const int ilStride = std::max(1, query.inlineStride);
     const int xlStride = std::max(1, query.crosslineStride);
 
     if (query.domainKind == HorizonSpatialDomainKind::ArbitraryTraceList) {
+        if(query.explicitTraces.size()>65536){error="显式地震道列表超过预算";return false;}
         targetTraces = query.explicitTraces;
     } else if (query.domainKind == HorizonSpatialDomainKind::ArbitraryXYPath) {
         if (!reader.hasCoordinateMap()) {
@@ -476,7 +375,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
             const int il = nearestLine(inlines, ilD);
             const int xl = nearestLine(crosslines, xlD);
             if (targetTraces.empty() || targetTraces.back().first != il || targetTraces.back().second != xl)
-                targetTraces.push_back({il, xl});
+                if(!appendTarget(il,xl))return false;
         }
     } else if (query.domainKind == HorizonSpatialDomainKind::InlineSection) {
         const int il = query.fixedLineNumber;
@@ -484,7 +383,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
         const int xlHi = (query.crosslineMin <= query.crosslineMax && query.crosslineMax > 0) ? query.crosslineMax : crosslines.back();
         for (size_t j = 0; j < crosslines.size(); j += size_t(xlStride)) {
             if (crosslines[j] >= xlLo && crosslines[j] <= xlHi)
-                targetTraces.push_back({il, crosslines[j]});
+                if(!appendTarget(il,crosslines[j]))return false;
         }
     } else if (query.domainKind == HorizonSpatialDomainKind::CrosslineSection) {
         const int xl = query.fixedLineNumber;
@@ -492,7 +391,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
         const int ilHi = (query.inlineMin <= query.inlineMax && query.inlineMax > 0) ? query.inlineMax : inlines.back();
         for (size_t i = 0; i < inlines.size(); i += size_t(ilStride)) {
             if (inlines[i] >= ilLo && inlines[i] <= ilHi)
-                targetTraces.push_back({inlines[i], xl});
+                if(!appendTarget(inlines[i],xl))return false;
         }
     } else {
         // FullHorizonGrid 或 InlineCrosslineBox
@@ -516,7 +415,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
             for (size_t j = 0; j < crosslines.size(); j += size_t(xlStride)) {
                 const int xl = crosslines[j];
                 if (xl < xlLo || xl > xlHi) continue;
-                targetTraces.push_back({il, xl});
+                if(!appendTarget(il,xl))return false;
             }
         }
     }
@@ -526,6 +425,9 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
         return false;
     }
 
+    if(targetTraces.size()>65536||query.resampledSampleCount<1||query.resampledSampleCount>4096){
+        error="层位窗口超过道数或重采样预算，请增大测线步长或缩小范围";return false;
+    }
     // 6. 可选：加载工区时深表用于每道 [windowTopDepthM, windowBottomDepthM] 换算
     TdDepthConverter tdConv;
     if (query.computeDepthRange) {
@@ -533,7 +435,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
     }
 
     // 7. 计算每道在目标层位/小层下的独立时间窗口 [windowTopTimeMs, windowBottomTimeMs] 与深度范围
-    result.traces.resize(targetTraces.size());
+    next.traces.resize(targetTraces.size());
     struct ValidTraceSpan {
         size_t resultIdx = 0;
         long long ordinal = -1;
@@ -553,7 +455,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
 
     for (size_t idx = 0; idx < targetTraces.size(); ++idx) {
         const auto [il, xl] = targetTraces[idx];
-        auto& meta = result.traces[idx];
+        auto& meta = next.traces[idx];
         meta.inlineNumber = il;
         meta.crosslineNumber = xl;
         meta.traceIndex = reader.traceIndex(il, xl);
@@ -561,14 +463,15 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
             reader.mapLine(il, xl, meta.x, meta.y);
         }
 
-        const double topT = topSurf.sampleAt(il, xl, meta.x, meta.y);
-        const double botT = botSurf.sampleAt(il, xl, meta.x, meta.y);
+        const double topT = topSurf.sampleAt(il,xl,error);
+        const double botT = botSurf.sampleAt(il,xl,error);
+        if(!error.empty())return false;
         meta.parentTopTimeMs = topT;
         meta.parentBottomTimeMs = botT;
 
         if (!isFiniteVal(topT) || !isFiniteVal(botT) || !(botT > topT)) {
             meta.status = 2; // 层位缺失、尖灭或顶底倒置
-            ++result.reviewTraceCount;
+            ++next.reviewTraceCount;
             continue;
         }
 
@@ -590,7 +493,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
 
         if (winBot < t0 || winTop > tEnd) {
             meta.status = 2;
-            ++result.reviewTraceCount;
+            ++next.reviewTraceCount;
             continue;
         }
 
@@ -599,8 +502,11 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
             continue;
         }
 
-        const int sBegin = std::clamp(static_cast<int>(std::floor((std::max(winTop, t0) - t0) / dt)), 0, ns - 1);
-        const int sEnd = std::clamp(static_cast<int>(std::ceil((std::min(winBot, tEnd) - t0) / dt)), sBegin, ns - 1);
+        const int sBegin=std::clamp(int(std::ceil((std::max(winTop,t0)-t0)/dt)),0,ns-1);
+        const double lastIndex=(std::min(winBot,tEnd)-t0)/dt;
+        const bool exclusiveBottom=subIndex>=1&&subIndex<4&&winBot<=tEnd;
+        const int sEnd=std::clamp(exclusiveBottom?int(std::ceil(lastIndex))-1:int(std::floor(lastIndex)),0,ns-1);
+        if(sEnd<sBegin){meta.status=2;++next.reviewTraceCount;continue;}
         const int sCount = sEnd - sBegin + 1;
 
         meta.status = 1;
@@ -610,8 +516,8 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
             meta.sampleOffset = totalBudgetSamples;
             totalBudgetSamples += sCount;
         } else if (query.sampleMode == HorizonWindowSampleMode::ResampledFixedCount) {
-            meta.sampleOffset = static_cast<long long>(idx) * result.fixedSampleCount;
-            totalBudgetSamples = static_cast<long long>(targetTraces.size()) * result.fixedSampleCount;
+            meta.sampleOffset = static_cast<long long>(idx) * next.fixedSampleCount;
+            totalBudgetSamples = static_cast<long long>(targetTraces.size()) * next.fixedSampleCount;
         }
         if (totalBudgetSamples > maxBudget) {
             error = "层位窗口样点总数超过 maxValues 预算上限，请增大步长、缩小范围或提高预算";
@@ -619,18 +525,18 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
         }
 
         validSpans.push_back({idx, meta.traceIndex, sBegin, sEnd});
-        ++result.validTraceCount;
+        ++next.validTraceCount;
     }
 
     // 预分配输出振幅数组
     const float qnan = std::numeric_limits<float>::quiet_NaN();
     if (query.sampleMode == HorizonWindowSampleMode::NativeVariableSamples) {
-        result.amplitudes.assign(static_cast<size_t>(totalBudgetSamples), qnan);
+        next.amplitudes.assign(static_cast<size_t>(totalBudgetSamples), qnan);
     } else if (query.sampleMode == HorizonWindowSampleMode::ResampledFixedCount) {
-        result.amplitudes.assign(targetTraces.size() * static_cast<size_t>(result.fixedSampleCount), qnan);
+        next.amplitudes.assign(targetTraces.size() * static_cast<size_t>(next.fixedSampleCount), qnan);
     }
 
-    if (validSpans.empty()) return true;
+    if (validSpans.empty()){result=std::move(next);return true;}
 
     // 8. 分批从 SEG-Y 读取各道在对应时间窗口内的波形，并计算变窗重采样与窗口属性
     constexpr size_t BatchLimit = 1024;
@@ -650,6 +556,8 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
             batchMaxSample = std::max(batchMaxSample, validSpans[i].sEnd);
             ordinals.push_back(validSpans[i].ordinal);
         }
+        // Linear interpolation needs bracketing source samples; statistics and native output stay strictly inside the unit.
+        if(query.sampleMode==HorizonWindowSampleMode::ResampledFixedCount){batchMinSample=std::max(0,batchMinSample-1);batchMaxSample=std::min(ns-1,batchMaxSample+1);}
         const int batchSampleCount = batchMaxSample - batchMinSample + 1;
 
         segy_detail::TraceWindowBatch batch;
@@ -658,15 +566,15 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
                                    batch, batchStats, error, cancelled))
             return false;
 
-        result.statistics.readCalls += batchStats.readCalls;
-        result.statistics.bytesRead += batchStats.bytesRead;
-        result.statistics.tracesRead += batchStats.tracesRead;
+        next.statistics.readCalls += batchStats.readCalls;
+        next.statistics.bytesRead += batchStats.bytesRead;
+        next.statistics.tracesRead += batchStats.tracesRead;
 
         const double batchT0 = t0 + double(batchMinSample) * dt;
 
         for (size_t localIdx = 0; localIdx < end - start; ++localIdx) {
             const auto& span = validSpans[start + localIdx];
-            auto& meta = result.traces[span.resultIdx];
+            auto& meta = next.traces[span.resultIdx];
             if (localIdx < batch.x.size() && isFiniteVal(batch.x[localIdx]) && isFiniteVal(batch.y[localIdx])) {
                 meta.x = batch.x[localIdx];
                 meta.y = batch.y[localIdx];
@@ -704,13 +612,13 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
             // (b) 拷贝原生变长样点或等比例重采样为固定 K 点
             if (query.sampleMode == HorizonWindowSampleMode::NativeVariableSamples) {
                 std::copy(tracePtr + localOffset, tracePtr + localOffset + sCount,
-                          result.amplitudes.begin() + meta.sampleOffset);
+                          next.amplitudes.begin() + meta.sampleOffset);
             } else if (query.sampleMode == HorizonWindowSampleMode::ResampledFixedCount) {
-                const int K = result.fixedSampleCount;
+                const int K = next.fixedSampleCount;
                 std::vector<float> sliceVec(tracePtr, tracePtr + batchSampleCount);
-                float* dst = result.amplitudes.data() + span.resultIdx * static_cast<size_t>(K);
+                float* dst = next.amplitudes.data() + span.resultIdx * static_cast<size_t>(K);
                 for (int k = 0; k < K; ++k) {
-                    const double frac = (K == 1) ? 0.5 : (double(k) / double(K - 1));
+                    const double frac = (K == 1) ? 0.5 : (double(k) / double(subIndex>=1&&subIndex<4?K:K-1));
                     const double tSample = meta.windowTopTimeMs + frac * (meta.windowBottomTimeMs - meta.windowTopTimeMs);
                     dst[k] = sampleTraceLinear(sliceVec, batchT0, dt, tSample);
                 }
@@ -718,6 +626,7 @@ bool DataService::readSeismicHorizonWindow(const SeismicHorizonWindowQuery& quer
         }
     }
 
+    result=std::move(next);
     return true;
 }
 
