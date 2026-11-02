@@ -270,8 +270,9 @@ bool DataService::readWellSubIntervalRange(const std::string& schemeId, const st
     error.clear(); result = {};
     StratigraphicScheme scheme;
     if (!readRevision(impl_->store, schemeId, revision, scheme, error)) return false;
-    if (!fw::findSubInterval(scheme, subInterval)) { error = "子层段不属于该方案修订"; return false; }
-    result = fw::wellRange(scheme, wellId, subInterval);
+    const auto* sub = fw::resolveSubInterval(scheme, subInterval.value);
+    if (!sub) { error = "子层段不属于该方案修订"; return false; }
+    result = fw::wellRange(scheme, wellId, sub->id);
     return true;
 }
 

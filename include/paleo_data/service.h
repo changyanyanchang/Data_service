@@ -100,27 +100,6 @@ struct CurveSlice {
     // 特别是读取原始值时，quality=1 的有限哨兵值仍然表示缺失，不能拿来算均值。
 };
 
-struct IntervalRecord {
-    long long id=0;       // 此层段的数据库编号，修改或删除时使用。
-    long long trackId=0;  // 所属分层道编号；同一口井可以有多套不同分层解释。
-    GeologicalInterval value; // 真正的层段数据：名称、顶深、底深、岩性/相等。
-};
-
-struct FeatureColumn {
-    long long curveId=0;
-    std::string name,unit;
-    std::vector<double> values;              // 这条曲线在公共深度轴上的数值。
-    std::vector<unsigned char> quality;
-};
-// 供后续算法使用的多曲线特征表：一个公共深度轴，多列曲线数值。
-// columns[j].values[i] 表示第 j 条曲线在 depths[i] 处的数值。
-struct WellFeatureTable {
-    long long wellId=0;
-    std::string depthUnit;
-    std::vector<double> depths;
-    std::vector<FeatureColumn> columns;
-};
-struct IntervalTrackResult { long long trackId=0,wellId=0; std::string name; DepthInfo depthInfo; std::vector<IntervalRecord> intervals; };
 // Plot input keeps groups, source IDs and conventions separate. No file reparse,
 // interpolation, implicit CRS inheritance or coordinate transformation is performed.
 struct ProjectCoordinates { std::string coordinateSystem, coordinateUnit; };
@@ -502,6 +481,24 @@ public:
     bool previewStratigraphicImpact(const StratigraphicScheme& candidate, std::vector<SubIntervalId>& subIntervals,
                                     std::vector<SubIntervalResultBinding>& affectedResults,
                                     std::string& error) const;
+    // 导入/建项期：基于工区地震层位 + 时深关系自动建立井震统一地层方案（T70-T72 及四等分小层 T70-T72-S1..S4），
+    // 并同步在井上生成 '地震层位' 与 '地震小层' 分层道（供测井道图显示与下游相预测/编图消费）。
+    bool buildSeismicStratigraphicFramework(const SeismicStratigraphyBuildOptions& options,
+                                            SeismicStratigraphyBuildReport& report,
+                                            std::string& error,
+                                            const CancelCheck& cancelled = {});
+    // 按层位/四等分小层读取三维地震变时窗/变深窗数据：每个空间点 (inline, crossline)/(x, y) 具有由顶底层位决定的独立时深范围。
+    bool readSeismicHorizonWindow(const SeismicHorizonWindowQuery& query,
+                                  SeismicHorizonWindowResult& result,
+                                  std::string& error,
+                                  const CancelCheck& cancelled = {}) const;
+    // 列出当前工区可用于单井相分析的地层道目录（包含地震地层道 '地震小层'/'地震层位' 及其他地质分层道 '组'/'段' 等）。
+    bool listAvailableStratigraphicTracks(std::vector<StratigraphicTrackDescriptor>& tracks,
+                                          std::string& error) const;
+    // 按层位/小层统一提取单井或多井测井曲线与辅助层段道切片（同时支持地震地层道与其他地质分层道）。
+    bool queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
+                                     std::vector<WellStratigraphicLogSlice>& results,
+                                     std::string& error) const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

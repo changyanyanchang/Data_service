@@ -2,8 +2,11 @@
 #include "paleo_data/service.h"
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QTemporaryDir>
+#include <QtEndian>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <set>
 #include <stdexcept>
@@ -209,10 +212,247 @@ static void legacyProjectWithoutFramework()
     std::vector<SubIntervalResultBinding> r; CHECK(ro.listSubIntervalResults("x", {}, r, err) && r.empty());
 }
 
+static void writeSegyFixture(const QString& path)
+{
+    auto u16 = [](QByteArray& bytes, int offset, quint16 value) { qToBigEndian(value, bytes.data() + offset); };
+    auto u32 = [](QByteArray& bytes, int offset, quint32 value) { qToBigEndian(value, bytes.data() + offset); };
+    QFile file(path);
+    CHECK(file.open(QIODevice::WriteOnly));
+    QByteArray text(3200, ' ');
+    const QByteArray label("C01 SEISMIC HORIZON WINDOW TEST");
+    std::memcpy(text.data(), label.constData(), size_t(label.size()));
+    file.write(text);
+    // 200 samples, dt = 2000 us (2 ms), firstTime = 1000 ms -> 1000..1398 ms
+    QByteArray binary(400, '\0');
+    u16(binary, 16, 2000);
+    u16(binary, 20, 200);
+    u16(binary, 24, 5); // IEEE float32
+    u16(binary, 300, 0x100);
+    u16(binary, 302, 1);
+    file.write(binary);
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            QByteArray head(240, '\0');
+            u32(head, 0, quint32(i * 2 + j + 1));
+            u16(head, 70, 1);
+            u16(head, 88, 1);
+            u16(head, 108, 1000); // delay time 1000 ms
+            u16(head, 114, 200);
+            u16(head, 116, 2000);
+            u32(head, 180, quint32(500000 + j * 100));
+            u32(head, 184, quint32(4000000 + i * 100));
+            u32(head, 188, quint32(100 + i * 2));
+            u32(head, 192, quint32(200 + j * 2));
+            file.write(head);
+            QByteArray samples(200 * 4, '\0');
+            for (int s = 0; s < 200; ++s) {
+                const float amp = float((i + 1) * 100.0 + (j + 1) * 10.0 + s * 0.5);
+                quint32 bits = 0;
+                std::memcpy(&bits, &amp, 4);
+                u32(samples, s * 4, bits);
+            }
+            file.write(samples);
+        }
+    }
+}
+
+static void seismicStratigraphyAndQueryApis()
+{
+    QTemporaryDir dir; CHECK(dir.isValid());
+    const std::string projPath = dir.path().toStdString() + "/hy_area";
+    std::string err;
+    DataService ds;
+    CHECK(ds.createProject(projPath, "HY井震联合测试工区", err));
+
+    // 1. 准备含 3 个倾斜地震层位 (T70, T72, T80)、带负 TWT 的时深关系、测井曲线 (GR, DT) 与地质分层道 (组/段) 的数据包
+    ParsedFile parsed;
+    parsed.kind = "synthetic";
+    for (auto [hname, baseTwt] : {std::pair{"T80", 1320.0}, {"T70", 1040.0}, {"T72", 1160.0}}) {
+        SeismicHorizon h;
+        h.horizonName = hname;
+        h.coordinateSystem = "EPSG:32650";
+        h.coordinateUnit = "m";
+        h.timeUnit = "ms";
+        h.timeType = "TWT";
+        for (int i = 0; i < 2; ++i) {
+            for (int j = 0; j < 2; ++j) {
+                // 随 (i, j) 倾斜，使每个空间点拥有不同的层位时间与深度范围
+                const double dipMs = i * 16.0 + j * 8.0;
+                h.points.push_back({100 + i * 2, 200 + j * 2, 500000.0 + j * 100.0, 4000000.0 + i * 100.0, baseTwt + dipMs});
+            }
+        }
+        parsed.horizons.push_back(std::move(h));
+    }
+
+    WellDataset well;
+    well.wellInfo.wellName = "HZ19-1-1";
+    well.wellInfo.wellheadX = 500000.0;
+    well.wellInfo.wellheadY = 4000000.0;
+    well.wellInfo.coordinateSystem = "EPSG:32650";
+    well.wellInfo.coordinateUnit = "m";
+    well.defaultDepthInfo.depthType = "MD";
+    well.defaultDepthInfo.depthUnit = "m";
+
+    // Petrel 风格负值 TWT 时深关系：1000 ms -> 1500 m, 1400 ms -> 2300 m（斜率 2.0 m/ms）
+    TimeDepthTable td;
+    td.relationName = "HZ19-1-1_TDR";
+    td.depthInfo.depthType = "MD";
+    td.depthInfo.depthUnit = "m";
+    td.timeUnit = "ms";
+    td.timeType = "TWT";
+    td.depthTimePairs = {
+        {1500.0, -1000.0, 500000.0, 4000000.0, -1500.0},
+        {1900.0, -1200.0, 500000.0, 4000000.0, -1900.0},
+        {2300.0, -1400.0, 500000.0, 4000000.0, -2300.0}
+    };
+    well.timeDepthRelations.push_back(std::move(td));
+
+    // 测井曲线组：1500..2200 m，步长 2 m
+    LogSet ls;
+    ls.logSetName = "常规测井";
+    ls.depthInfo.depthType = "MD";
+    ls.depthInfo.depthUnit = "m";
+    ls.samplingAxis.sampleStep = 2.0;
+    LogCurve gr{"GR", "API", {}, "自然伽马"}, dt{"DT", "us/ft", {}, "声波时差"};
+    for (double d = 1500.0; d <= 2200.0; d += 2.0) {
+        ls.samplingAxis.depthValues.push_back(d);
+        gr.sampleValues.push_back(40.0 + 0.05 * (d - 1500.0));
+        dt.sampleValues.push_back(95.0 - 0.02 * (d - 1500.0));
+    }
+    ls.logCurves.push_back(std::move(gr));
+    ls.logCurves.push_back(std::move(dt));
+    well.wellbore.logSets.push_back(std::move(ls));
+
+    // 常规地质分层道（段：文三段 1560..1840 m）
+    IntervalTrack segTrack;
+    segTrack.trackName = "段";
+    segTrack.trackType = "地层";
+    segTrack.depthInfo.depthType = "MD";
+    segTrack.depthInfo.depthUnit = "m";
+    GeologicalInterval segIv;
+    segIv.intervalName = "文三段";
+    segIv.topDepth = 1560.0;
+    segIv.bottomDepth = 1840.0;
+    segTrack.intervals.push_back(segIv);
+    well.wellbore.intervalTracks.push_back(std::move(segTrack));
+    parsed.wells.push_back(std::move(well));
+
+    const QString dummySrc = dir.path() + "/synthetic.xml";
+    { QFile f(dummySrc); CHECK(f.open(QIODevice::WriteOnly)); f.write("synthetic"); }
+    SourceEntry src;
+    long long srcId = 0;
+    // 用 importFile 导入 SEG-Y，并写入井/层位/时深
+    const QString segyPath = dir.path() + "/cube.sgy";
+    writeSegyFixture(segyPath);
+    ImportOptions impOpts; impOpts.copySources = false;
+    ImportReport impRep;
+    CHECK(ds.importFile(segyPath.toUtf8().toStdString(), impOpts, impRep, err));
+
+    // 借用内部 ProjectStore 保存合成井与层位（或通过 SQL/importPreparedFile）
+    // 计算 dummySrc 的 SHA-256 以调用 importPreparedFile
+    CHECK(ds.importPreparedFile(dummySrc.toUtf8().toStdString(), dummySrc.toUtf8().toStdString(),
+                                dummySrc.toUtf8().toStdString(),
+                                "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+                                parsed, srcId, err));
+
+    // 2. 调用 buildSeismicStratigraphicFramework 自动建立井震统一地层方案与四等分小层
+    SeismicStratigraphyBuildOptions buildOpts;
+    SeismicStratigraphyBuildReport buildRep;
+    CHECK(ds.buildSeismicStratigraphicFramework(buildOpts, buildRep, err));
+    CHECK(buildRep.horizonCount == 3);
+    CHECK((buildRep.orderedHorizonNames == std::vector<std::string>{"T70", "T72", "T80"}));
+    CHECK(buildRep.intervalCount == 2);
+    CHECK(buildRep.subIntervalCount == 8);
+    CHECK(buildRep.matchedWellCount == 1);
+
+    // 验证井上已生成 '地震层位'（T70-T72, T72-T80）与 '地震小层'（T70-T72-S1..S4, T72-T80-S1..S4）
+    std::vector<WellSummary> wells;
+    CHECK(ds.listWells(wells, err) && wells.size() == 1);
+    const long long wellId = wells.front().id;
+    WellPlotData plotData;
+    CHECK(ds.readWellPlotData(wellId, {}, plotData, err));
+    bool foundSeismicIvTrack = false, foundSeismicSubTrack = false;
+    for (const auto& trk : plotData.intervals) {
+        if (trk.value.trackName == "地震层位") {
+            foundSeismicIvTrack = true;
+            CHECK(trk.value.intervals.size() == 2);
+            // T70 (1040 ms -> 1580 m), T72 (1160 ms -> 1820 m)
+            CHECK(trk.value.intervals[0].intervalName == "T70-T72");
+            CHECK(near(trk.value.intervals[0].topDepth, 1580.0));
+            CHECK(near(trk.value.intervals[0].bottomDepth, 1820.0));
+        } else if (trk.value.trackName == "地震小层") {
+            foundSeismicSubTrack = true;
+            CHECK(trk.value.intervals.size() == 8);
+            // T70-T72 (1580..1820 m, 厚 240 m) 四等分每小层 60 m：S1=1580..1640, S2=1640..1700
+            CHECK(trk.value.intervals[0].intervalName == "T70-T72-S1");
+            CHECK(near(trk.value.intervals[0].topDepth, 1580.0) && near(trk.value.intervals[0].bottomDepth, 1640.0));
+            CHECK(trk.value.intervals[1].intervalName == "T70-T72-S2");
+            CHECK(near(trk.value.intervals[1].topDepth, 1640.0) && near(trk.value.intervals[1].bottomDepth, 1700.0));
+        }
+    }
+    CHECK(foundSeismicIvTrack && foundSeismicSubTrack);
+
+    // 3. 验证 listAvailableStratigraphicTracks 与 queryWellLogsByStratigraphy（双轨：地震小层道 + 常规地质分层道）
+    std::vector<StratigraphicTrackDescriptor> availTracks;
+    CHECK(ds.listAvailableStratigraphicTracks(availTracks, err));
+    CHECK(availTracks.size() >= 3);
+
+    // 3a. 查询地震小层 T70-T72-S2（1640..1700 m）
+    WellIntervalLogQuery logQ;
+    logQ.stratigraphy.source = StratigraphicTrackSource::SeismicFramework;
+    logQ.stratigraphy.subIntervalId = SubIntervalId{"T70-T72-S2"};
+    logQ.curveNames = {"GR", "DT"};
+    logQ.normalizedSampleCount = 16;
+    std::vector<WellStratigraphicLogSlice> logSlices;
+    CHECK(ds.queryWellLogsByStratigraphy(logQ, logSlices, err) && logSlices.size() == 1);
+    CHECK(logSlices[0].resolved);
+    CHECK(logSlices[0].unitName == "T70-T72-S2");
+    CHECK(near(logSlices[0].topDepth, 1640.0) && near(logSlices[0].bottomDepth, 1700.0));
+    CHECK(near(logSlices[0].topTimeMs, 1070.0) && near(logSlices[0].bottomTimeMs, 1100.0));
+    CHECK(logSlices[0].featureTable.columns.size() == 2);
+    CHECK(!logSlices[0].featureTable.depths.empty());
+    CHECK(near(logSlices[0].featureTable.depths.front(), 1640.0));
+    CHECK(near(logSlices[0].featureTable.depths.back(), 1700.0));
+    CHECK(logSlices[0].normalizedFeatureTable.depths.size() == 16);
+
+    // 3b. 查询其他地层道：段 / 文三段（1560..1840 m）
+    WellIntervalLogQuery geoQ;
+    geoQ.stratigraphy.source = StratigraphicTrackSource::WellIntervalTrack;
+    geoQ.stratigraphy.trackName = "段";
+    geoQ.stratigraphy.unitName = "文三段";
+    geoQ.curveNames = {"GR"};
+    std::vector<WellStratigraphicLogSlice> geoSlices;
+    CHECK(ds.queryWellLogsByStratigraphy(geoQ, geoSlices, err) && geoSlices.size() == 1);
+    CHECK(geoSlices[0].resolved && geoSlices[0].trackName == "段" && geoSlices[0].unitName == "文三段");
+    CHECK(near(geoSlices[0].topDepth, 1560.0) && near(geoSlices[0].bottomDepth, 1840.0));
+    CHECK(geoSlices[0].featureTable.columns.size() == 1);
+
+    // 4. 验证 readSeismicHorizonWindow：每个空间点具有不同的时间窗与深度窗
+    SeismicHorizonWindowQuery winQ;
+    winQ.target.subIntervalId = SubIntervalId{"T70-T72-S2"}; // S2 = [0.25, 0.50]
+    winQ.domainKind = HorizonSpatialDomainKind::FullHorizonGrid;
+    winQ.sampleMode = HorizonWindowSampleMode::ResampledFixedCount;
+    winQ.resampledSampleCount = 12;
+    winQ.computeWindowAttributes = true;
+    winQ.computeDepthRange = true;
+    SeismicHorizonWindowResult winRes;
+    CHECK(ds.readSeismicHorizonWindow(winQ, winRes, err));
+    CHECK(winRes.validTraceCount == 4);
+    CHECK(winRes.traces.size() == 4);
+    CHECK(winRes.amplitudes.size() == 4 * 12);
+    // 点 0 (IL=100, XL=200): T70=1040, T72=1160 -> S2=[1070, 1100] ms -> 深度 [1640, 1700] m
+    // 点 3 (IL=102, XL=202): T70=1064, T72=1184 -> S2=[1094, 1124] ms -> 深度 [1688, 1748] m
+    CHECK(near(winRes.traces[0].windowTopTimeMs, 1070.0) && near(winRes.traces[0].windowBottomTimeMs, 1100.0));
+    CHECK(near(winRes.traces[3].windowTopTimeMs, 1094.0) && near(winRes.traces[3].windowBottomTimeMs, 1124.0));
+    CHECK(winRes.traces[0].windowTopDepthM < winRes.traces[3].windowTopDepthM);
+    CHECK(std::isfinite(winRes.traces[0].rmsAmplitude) && winRes.traces[0].rmsAmplitude > 0.0f);
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     pureModel(); seismicMask(); persistence(); legacyProjectWithoutFramework();
+    seismicStratigraphyAndQueryApis();
     if (failures) { std::cerr << failures << " failures\n"; return 1; }
     std::cout << "stratigraphic_framework_tests passed\n";
     return 0;

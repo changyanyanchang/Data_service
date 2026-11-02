@@ -101,7 +101,7 @@ int field(const QStringList& header,std::initializer_list<const char*> names){
     for(int i=0;i<header.size();++i)for(const char* name:names)if(headerName(header[i])==QString::fromUtf8(name))return i;return -1;
 }
 QString wellToken(const QString& value){
-    static const QRegularExpression pattern("[A-Z]{1,8}[0-9]{1,4}(?:-[0-9]{1,4}[A-Z0-9]*){1,5}");
+    thread_local const QRegularExpression pattern("[A-Z]{1,8}[0-9]{1,4}(?:-[0-9]{1,4}[A-Z0-9]*){1,5}");
     QString v=value.toUpper();v.replace('_','-');v.replace(QChar(0x2013),'-');v.replace(QChar(0x2014),'-');return pattern.match(v).captured();
 }
 double number(const QString& value,bool* invalid=nullptr){
