@@ -1,6 +1,7 @@
 #pragma once
 #include "parser.h"
 #include "seismic.h"
+#include "section_horizons.h"
 #include "graph.h"
 #include <utility>
 #include "interpretation.h"
@@ -352,6 +353,10 @@ public:
     bool readVolume(long long id, SeismicVolume& result, std::string& error) const; // metadata only; traces stays empty
     bool saveVolume(long long id, const SeismicVolume& value, std::string& error); // edits existing registration; never stores amplitudes
     bool readHorizon(long long id, long long offset, int limit, SeismicHorizon& result, std::string& error) const;
+    // Metadata only: major horizons and scheme-defined S1..S4 edges sampled at
+    // the actual displayed trace columns. No SEG-Y amplitudes or well TD required.
+    bool readSectionHorizons(const SectionHorizonQuery& query, SectionHorizonResult& result,
+                             std::string& error, const CancelCheck& cancelled={}) const;
     // Bounding box uses this horizon's original X/Y coordinate units. Unknown CRS remains unknown.
     // Returns actual source points; exceeding maxPoints is an error, never silent downsampling.
     bool readHorizonRegion(long long id, double xMin, double yMin, double xMax, double yMax,
