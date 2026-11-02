@@ -14,14 +14,28 @@ bool finiteCurve(const SectionHorizonCurve& curve){
 // Exact picks win, including explicit nulls. Only a complete enclosing local
 // grid cell may be interpolated; neither null corners nor outside coverage extend.
 class GridSampler {
-    QSqlQuery exact_,near_;
+    QSqlQuery exact_,below_,above_,left_,right_;
     long long horizon_;int radius_;
+    double row(int il,int xl,int& lo,int& hi,std::string& error){
+        const auto at=[&](QSqlQuery& q,int lo,int hi,int& x){
+            q.finish();q.bindValue(0,horizon_);q.bindValue(1,il);q.bindValue(2,lo);q.bindValue(3,hi);
+            if(!q.exec()){error=s(q.lastError().text());return Missing;}
+            if(!q.next())return Missing;
+            x=q.value(0).toInt();return value(q.value(1));
+        };
+        const double a=at(left_,xl-radius_,xl,lo),b=at(right_,xl,xl+radius_,hi);
+        if(!std::isfinite(a)||!std::isfinite(b))return Missing;
+        return hi==lo?a:a+(b-a)*double(xl-lo)/(hi-lo);
+    }
 public:
     GridSampler(const ProjectStore& store,long long horizon,int radius)
-      :exact_(store.db),near_(store.db),horizon_(horizon),radius_(radius){}
+      :exact_(store.db),below_(store.db),above_(store.db),left_(store.db),right_(store.db),horizon_(horizon),radius_(radius){}
     bool prepare(std::string& error){
         if(exact_.prepare("SELECT z FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no=? AND crossline_no=? ORDER BY seq,id LIMIT 1")&&
-           near_.prepare("SELECT inline_no,crossline_no,z FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no BETWEEN ? AND ? AND crossline_no BETWEEN ? AND ? ORDER BY seq,id"))return true;
+           below_.prepare("SELECT inline_no FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no BETWEEN ? AND ? ORDER BY inline_no DESC LIMIT 1")&&
+           above_.prepare("SELECT inline_no FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no BETWEEN ? AND ? ORDER BY inline_no LIMIT 1")&&
+           left_.prepare("SELECT crossline_no,z FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no=? AND crossline_no BETWEEN ? AND ? ORDER BY crossline_no DESC,seq,id LIMIT 1")&&
+           right_.prepare("SELECT crossline_no,z FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no=? AND crossline_no BETWEEN ? AND ? ORDER BY crossline_no,seq,id LIMIT 1"))return true;
         error="层位网格查询准备失败";return false;
     }
     double sample(int il,int xl,std::string& error){
@@ -29,22 +43,19 @@ public:
         if(!exact_.exec()){error=s(exact_.lastError().text());return Missing;}
         if(exact_.next())return value(exact_.value(0));
         if(!radius_)return Missing;
-        near_.finish();near_.bindValue(0,horizon_);near_.bindValue(1,il-radius_);near_.bindValue(2,il+radius_);
-        near_.bindValue(3,xl-radius_);near_.bindValue(4,xl+radius_);
-        if(!near_.exec()){error=s(near_.lastError().text());return Missing;}
-        std::map<std::pair<int,int>,double> points;
-        int loI=il-radius_-1,hiI=il+radius_+1,loX=xl-radius_-1,hiX=xl+radius_+1;
-        while(near_.next()){
-            const int i=near_.value(0).toInt(),x=near_.value(1).toInt();
-            points.emplace(std::pair{i,x},value(near_.value(2)));
-            if(i<=il)loI=std::max(loI,i);if(i>=il)hiI=std::min(hiI,i);
-            if(x<=xl)loX=std::max(loX,x);if(x>=xl)hiX=std::min(hiX,x);
-        }
-        const auto at=[&](int i,int x){auto p=points.find({i,x});return p==points.end()?Missing:p->second;};
-        const double a=at(loI,loX),b=at(loI,hiX),c=at(hiI,loX),d=at(hiI,hiX);
-        if(!std::isfinite(a)||!std::isfinite(b)||!std::isfinite(c)||!std::isfinite(d))return Missing;
-        const double fx=hiX==loX?0.:double(xl-loX)/(hiX-loX),fi=hiI==loI?0.:double(il-loI)/(hiI-loI);
-        return (a+(b-a)*fx)*(1-fi)+(c+(d-c)*fx)*fi;
+        const auto line=[&](QSqlQuery& q,int lo,int hi,int& number){
+            q.finish();q.bindValue(0,horizon_);q.bindValue(1,lo);q.bindValue(2,hi);
+            if(!q.exec()){error=s(q.lastError().text());return false;}
+            if(!q.next())return false;
+            number=q.value(0).toInt();return true;
+        };
+        int lo=il,hi=il;
+        if(!line(below_,il-radius_,il,lo)||!line(above_,il,il+radius_,hi))return Missing;
+        int leftA=xl,rightA=xl,leftB=xl,rightB=xl;
+        const double a=row(lo,xl,leftA,rightA,error);if(lo==hi)return a;
+        const double b=row(hi,xl,leftB,rightB,error);
+        if(!std::isfinite(a)||!std::isfinite(b)||leftA!=leftB||rightA!=rightB)return Missing;
+        return a+(b-a)*double(il-lo)/(hi-lo);
     }
 };
 }
@@ -53,7 +64,7 @@ bool DataService::readSectionHorizons(const SectionHorizonQuery& query,SectionHo
     result={};error.clear();
     const auto stopped=[&]{if(cancelled&&cancelled()){error="层位叠加读取已取消";return true;}return false;};
     if(stopped())return false;
-    if(query.columns.empty()||query.columns.size()>65536||query.interpolationRadius<0||query.interpolationRadius>16){error="层位叠加列数或插值邻域无效";return false;}
+    if(query.columns.empty()||query.columns.size()>65536||query.interpolationRadius<0||query.interpolationRadius>128){error="层位叠加列数或插值邻域无效";return false;}
     for(const auto& col:query.columns)if(query.interpolationRadius&&
       (col.inlineNumber<=std::numeric_limits<int>::min()+query.interpolationRadius||col.inlineNumber>=std::numeric_limits<int>::max()-query.interpolationRadius||
        col.crosslineNumber<=std::numeric_limits<int>::min()+query.interpolationRadius||col.crosslineNumber>=std::numeric_limits<int>::max()-query.interpolationRadius)){

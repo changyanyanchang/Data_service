@@ -14,7 +14,7 @@ struct SectionHorizonQuery {
     std::string schemeId="default", revision;
     // Explicit display convention for sources without declarations. Empty = skip.
     std::string undeclaredTimeUnit, undeclaredTimeType;
-    int interpolationRadius=2; // bounded line-number neighbourhood; 0 = exact only
+    int interpolationRadius=64; // bounded line-number neighbourhood; 0 = exact only
 };
 struct SectionHorizonCurve {
     std::string id, name, intervalId;
