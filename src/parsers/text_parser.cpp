@@ -24,10 +24,10 @@ bool mapWellCoordinateTables(ParsedFile&,const ParseOptions&,const CancelCheck&)
 namespace {
 std::string s(const QString& value) { return value.toUtf8().toStdString(); }
 QString q(const std::string& value) { return QString::fromUtf8(value); }
-const QRegularExpression WellPattern(QStringLiteral("[A-Z]{1,8}[0-9]{1,4}(?:-[A-Z]{0,3}[0-9]{1,4}[A-Z0-9]*){1,5}"));
 QString wellToken(QString text) {
+    thread_local const QRegularExpression wellPattern(QStringLiteral("[A-Z]{1,8}[0-9]{1,4}(?:-[A-Z]{0,3}[0-9]{1,4}[A-Z0-9]*){1,5}"));
     text=text.trimmed().toUpper();text.replace('_','-');text.replace(QChar(0x2013),'-');text.replace(QChar(0x2014),'-');
-    const auto match=WellPattern.match(text); return match.hasMatch()?match.captured():QString();
+    const auto match=wellPattern.match(text); return match.hasMatch()?match.captured():QString();
 }
 bool cancelledNow(const CancelCheck& cancelled, int) { return cancelled && cancelled(); }
 void addIssue(ParsedFile& out, const char* code, const QString& message, int row=0, bool blocking=false, const QString& original={}) {

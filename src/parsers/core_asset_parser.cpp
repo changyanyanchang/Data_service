@@ -15,7 +15,10 @@ std::string s(const QString& value) { return value.toUtf8().toStdString(); }
 
 // 只识别完整的“区块-构造-单井”三段名称；两段油田名、CORE2-1、NMR220 等不是井。
 // 当前目录的支线后缀包含 D/SA/DSA/H/P/ST，其他未知后缀不猜；保留 B12H、A8ST3P、A5P1。
-const QRegularExpression WellName(QStringLiteral("(?<![A-Z0-9])([A-Z]{1,8}[0-9]{1,4})-([0-9]{1,4})(?:[- ]+|(?=[A-Z]))([A-Z]{0,3}[0-9]{1,4}(?:(?:DSA|SA|ST|D|H|P)[0-9]*)*)(?![A-Z0-9])"));
+const QRegularExpression& wellNamePattern() {
+    thread_local const QRegularExpression pattern(QStringLiteral("(?<![A-Z0-9])([A-Z]{1,8}[0-9]{1,4})-([0-9]{1,4})(?:[- ]+|(?=[A-Z]))([A-Z]{0,3}[0-9]{1,4}(?:(?:DSA|SA|ST|D|H|P)[0-9]*)*)(?![A-Z0-9])"));
+    return pattern;
+}
 const QSet<QString> ImageExtensions={"jpg","jpeg","png","bmp","tif","tiff","gif"};
 
 QString normalized(QString text) {
@@ -33,7 +36,7 @@ void issue(ParsedFile& out,const char* code,const QString& message,const QString
 QStringList wellNames(const QStringList& components) {
     QSet<QString> names;
     for (const QString& component:components) {
-        auto matches=WellName.globalMatch(normalized(component));
+        auto matches=wellNamePattern().globalMatch(normalized(component));
         while(matches.hasNext()) {
             const auto match=matches.next();
             // NMR110_220_250_240 是本批核磁测井处理通道组合，不是 NMR110-220-250 井。
@@ -66,10 +69,10 @@ QString attachmentType(const QString& extension,const QString& name) {
 
 bool looksLikeCorePhoto(const QStringList& relativeParts,const QString& fileName) {
     // 解释图、柱状图、报告插图没有照片的可靠语义，不能因其位于“岩心”目录就归入照片道。
-    static const QRegularExpression chart(QStringLiteral("柱状图|岩芯分析|岩心分析|取芯描述|取心描述|岩心描述|岩芯描述|扫描伽马|ELAN|综合图|附图"),QRegularExpression::CaseInsensitiveOption);
+    thread_local const QRegularExpression chart(QStringLiteral("柱状图|岩芯分析|岩心分析|取芯描述|取心描述|岩心描述|岩芯描述|扫描伽马|ELAN|综合图|附图"),QRegularExpression::CaseInsensitiveOption);
     if(chart.match(fileName).hasMatch()) return false;
     const QString parents=relativeParts.mid(0,relativeParts.size()-1).join('/');
-    static const QRegularExpression photoFolder(QStringLiteral("照片|照相|拍摄|扫描照片|(^|/)(ygtx[0-9]*|zqm[0-9]*)($|/)"),QRegularExpression::CaseInsensitiveOption);
+    thread_local const QRegularExpression photoFolder(QStringLiteral("照片|照相|拍摄|扫描照片|(^|/)(ygtx[0-9]*|zqm[0-9]*)($|/)"),QRegularExpression::CaseInsensitiveOption);
     const bool explicitPhotoFolder=photoFolder.match(parents).hasMatch();
     if(!explicitPhotoFolder && (parents.contains(QStringLiteral("报告")) || parents.contains(QStringLiteral("描述")))) return false;
     return explicitPhotoFolder || fileName.contains(QStringLiteral("白光")) || fileName.contains(QStringLiteral("荧光"));
@@ -93,10 +96,10 @@ QString depthUnit(QString text) {
 // 有单位的区间/单点可以落值。无单位的区间仅保留候选，除非导入者明确给出单位。
 // 盒号 1-4、相机时间戳及 1-3810.0 这类“序号-深度”都不会被转换为顶底深。
 void photoDepth(CorePhoto& photo,DepthInfo& info,const QString& fileName,const ParseOptions& options,ParsedFile& out) {
-    QString label=normalized(QFileInfo(fileName).completeBaseName()); label.remove(WellName); label=label.trimmed();
-    static const QString number=QStringLiteral("([0-9]+(?:\\.[0-9]+)?)");
-    static const QRegularExpression range(QStringLiteral("^\\s*")+number+QStringLiteral("\\s*(M|FT|米|英尺)?\\s*[-~～至]\\s*")+number+QStringLiteral("\\s*(M|FT|米|英尺)?(?![0-9.])"));
-    static const QRegularExpression point(QStringLiteral("^\\s*")+number+QStringLiteral("\\s*(M|FT|米|英尺)(?![A-Z])"));
+    QString label=normalized(QFileInfo(fileName).completeBaseName()); label.remove(wellNamePattern()); label=label.trimmed();
+    thread_local const QString number=QStringLiteral("([0-9]+(?:\\.[0-9]+)?)");
+    thread_local const QRegularExpression range(QStringLiteral("^\\s*")+number+QStringLiteral("\\s*(M|FT|米|英尺)?\\s*[-~～至]\\s*")+number+QStringLiteral("\\s*(M|FT|米|英尺)?(?![0-9.])"));
+    thread_local const QRegularExpression point(QStringLiteral("^\\s*")+number+QStringLiteral("\\s*(M|FT|米|英尺)(?![A-Z])"));
     const auto match=range.match(label);
     double top=Missing,bottom=Missing; QString unit,observed;
     bool validCandidate=false;

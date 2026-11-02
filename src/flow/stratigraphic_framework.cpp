@@ -192,6 +192,42 @@ const StratigraphicBoundary* findBoundary(const StratigraphicScheme& s, const Bo
     for (const auto& v : s.boundaries) if (v.id == id) return &v;
     return nullptr;
 }
+const StratigraphicInterval* resolveInterval(const StratigraphicScheme& s, const std::string& idOrName)
+{
+    if (idOrName.empty()) return nullptr;
+    if (const auto* iv = findInterval(s, IntervalId{idOrName})) return iv;
+    for (const auto& iv : s.intervals) {
+        if (displayName(s, iv.id) == idOrName) return &iv;
+        const auto* t = findBoundary(s, iv.top);
+        const auto* b = findBoundary(s, iv.bottom);
+        if (t && b && (t->name + "-" + b->name) == idOrName) return &iv;
+    }
+    const auto leg = resolveLegacyLabel(s, idOrName);
+    if (!leg.interval.empty()) return findInterval(s, leg.interval);
+    return nullptr;
+}
+const StratigraphicSubInterval* resolveSubInterval(const StratigraphicScheme& s, const std::string& idOrName)
+{
+    if (idOrName.empty()) return nullptr;
+    if (const auto* sub = findSubInterval(s, SubIntervalId{idOrName})) return sub;
+    for (const auto& sub : s.subIntervals) {
+        if (displayName(s, sub.id) == idOrName) return &sub;
+        const auto* iv = findInterval(s, sub.interval);
+        if (!iv) continue;
+        const auto* t = findBoundary(s, iv->top);
+        const auto* b = findBoundary(s, iv->bottom);
+        if (t && b) {
+            const std::string base = t->name + "-" + b->name;
+            const std::string sfx = std::to_string(sub.index);
+            if (idOrName == base + "-S" + sfx || idOrName == base + "-s" + sfx ||
+                idOrName == base + "/S" + sfx || idOrName == base + "/s" + sfx)
+                return &sub;
+        }
+    }
+    const auto leg = resolveLegacyLabel(s, idOrName);
+    if (!leg.subInterval.empty()) return findSubInterval(s, leg.subInterval);
+    return nullptr;
+}
 std::string displayName(const StratigraphicScheme& s, const IntervalId& id)
 {
     const auto* iv = findInterval(s, id);
@@ -335,6 +371,11 @@ LegacyUnitResolution resolveLegacyLabel(const StratigraphicScheme& s, const std:
         if (tail.size() == 2 && (tail[0] == 'S' || tail[0] == 's') && tail[1] >= '1' && tail[1] <= '4') index = tail[1] - '0';
         else { r.reason = "无法识别的子层段后缀"; return r; }
         label = label.substr(0, slash);
+    } else if (label.size() > 3 && label[label.size() - 3] == '-' &&
+               (label[label.size() - 2] == 'S' || label[label.size() - 2] == 's') &&
+               label.back() >= '1' && label.back() <= '4') {
+        index = label.back() - '0';
+        label = label.substr(0, label.size() - 3);
     }
     const auto dash = label.find('-');
     if (dash == std::string::npos) {

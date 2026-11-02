@@ -1,5 +1,7 @@
 #pragma once
 #include "model.h"
+#include "stratigraphic_framework.h"
+#include <utility>
 
 namespace paleo::data {
 
@@ -104,6 +106,121 @@ struct SeismicStatistics {
     long long finiteCount = 0, missingCount = 0;
     double minimum = Missing, maximum = Missing;
     double mean = Missing, rms = Missing; // 忽略NaN；全缺失时保持NaN。
+};
+
+// 地震层位/小层定位器：支持按四等分小层（T70-T72-S1..S4）、父层位（T70-T72）或直接指定顶底层位资源 ID。
+struct SeismicStratigraphicTarget {
+    std::string schemeId = "default";
+    std::string revision;          // 空表示读取当前头修订
+    SubIntervalId subIntervalId;   // 优先：四等分小层 ID（如 "T70-T72-S1"）
+    IntervalId intervalId;         // 备选：父层位单元 ID（如 "T70-T72"）
+    std::string unitName;          // 可读名称（如 "T70-T72-S1" 或 "T70-T72"）
+    long long topHorizonId = 0;    // 可选兜底：直接指定顶/底地震层位资源 ID
+    long long bottomHorizonId = 0;
+    int subIndex = 0;              // 0=整层段；1..4=四等分中的第 k 个小层
+};
+
+// 逐道变深度/变时窗采样输出模式：
+enum class HorizonWindowSampleMode {
+    NativeVariableSamples, // 保留每道在 [topTime, bottomTime] 内的原生变长样点（CSR 紧凑数组）
+    ResampledFixedCount,   // 每道在自身 [topTime, bottomTime] 内等比例重采样为固定 K 个样点（N × K 规则张量，供地震相预测直接输入）
+    SummaryAttributesOnly  // 仅返回每道在该小层窗口内的统计属性与顶底时深，不拷贝波形数组
+};
+
+// 空间查询域类型：
+enum class HorizonSpatialDomainKind {
+    FullHorizonGrid,       // 小层有效覆盖的全部测网点（按 inlineStride / crosslineStride 步进）
+    InlineCrosslineBox,    // 指定 Inline/Crossline 矩形子区
+    InlineSection,         // 单条 Inline 测线剖面（fixedLineNumber）
+    CrosslineSection,      // 单条 Crossline 测线剖面（fixedLineNumber）
+    ArbitraryTraceList,    // 指定的一组 (inline, crossline) 道列表（explicitTraces）
+    ArbitraryXYPath        // 任意折线/井间连线 XY 路径（xyPoints）
+};
+
+struct SeismicHorizonWindowQuery {
+    long long volumeId = 0;                  // 地震体 ID（0 表示自动选用工区主三维地震体）
+    SeismicStratigraphicTarget target;       // 目标小层（如 T70-T72-S1）或父层位（T70-T72）
+    HorizonSpatialDomainKind domainKind = HorizonSpatialDomainKind::FullHorizonGrid;
+
+    // 空间范围控制：
+    int inlineMin = 0, inlineMax = 0, inlineStride = 1;
+    int crosslineMin = 0, crosslineMax = 0, crosslineStride = 1;
+    int fixedLineNumber = 0;                 // InlineSection / CrosslineSection 时使用
+    std::vector<std::pair<int, int>> explicitTraces; // ArbitraryTraceList: (inline, crossline)
+    std::vector<std::pair<double, double>> xyPoints; // ArbitraryXYPath: (x, y)
+
+    // 窗口外扩与输出控制：
+    double padTopMs = 0.0;                   // 窗口顶界向上额外外扩毫秒数
+    double padBottomMs = 0.0;                // 窗口底界向下额外外扩毫秒数
+    HorizonWindowSampleMode sampleMode = HorizonWindowSampleMode::ResampledFixedCount;
+    int resampledSampleCount = 32;           // ResampledFixedCount 模式下每道重采样点数 K
+    bool computeWindowAttributes = true;     // 同步计算每道在该小层内的 RMS/均幅/峰值/能量属性
+    bool computeDepthRange = true;           // 利用工区时深关系换算每道 [topDepthM, bottomDepthM]
+    long long maxValues = 32000000;          // 样点预算上限
+};
+
+// 单道在该小层/层位下的实际变时深窗口元数据：
+struct TraceHorizonWindowMeta {
+    long long traceIndex = -1;
+    int inlineNumber = 0;
+    int crosslineNumber = 0;
+    double x = Missing, y = Missing;
+
+    // 该点由层位面 + 四等分比例算出的精确时间窗口（每道不同）：
+    double parentTopTimeMs = Missing;        // 父层位顶界时间（如 T70 在该点的时间）
+    double parentBottomTimeMs = Missing;     // 父层位底界时间（如 T72 在该点的时间）
+    double windowTopTimeMs = Missing;        // 当前小层（如 S1）在该点的顶界时间
+    double windowBottomTimeMs = Missing;     // 当前小层（如 S1）在该点的底界时间
+
+    // 经工区时深关系换算的该点深度范围（每道不同）：
+    double windowTopDepthM = Missing;
+    double windowBottomDepthM = Missing;
+    double thicknessTimeMs = Missing;
+    double thicknessDepthM = Missing;
+
+    // NativeVariableSamples 模式下在 amplitudes 数组中的偏移与原生样点数：
+    long long sampleOffset = 0;
+    int nativeSampleCount = 0;
+    double firstSampleTimeMs = Missing;
+
+    // 该道在本小层窗口内的统计属性（供属性成图与地震相特征直接消费）：
+    float rmsAmplitude = std::numeric_limits<float>::quiet_NaN();
+    float meanAbsAmplitude = std::numeric_limits<float>::quiet_NaN();
+    float maxPeakAmplitude = std::numeric_limits<float>::quiet_NaN();
+    float minTroughAmplitude = std::numeric_limits<float>::quiet_NaN();
+    float energyAmplitude = std::numeric_limits<float>::quiet_NaN();
+
+    // 1=有效小层窗口，0=缺道，2=层位缺失/尖灭/倒置待复核
+    std::uint8_t status = 0;
+};
+
+struct SeismicHorizonWindowResult {
+    long long volumeId = 0;
+    std::string schemeId;
+    InterpretationRevisionId schemeRevision;
+    IntervalId intervalId;
+    SubIntervalId subIntervalId;
+    std::string unitDisplayName;             // 如 "T70-T72-S1"
+    int subIndex = 0;                        // 1..4（或 0 表示整层）
+    double fractionTop = 0.0, fractionBottom = 1.0; // 如 S1 为 [0.0, 0.25]
+
+    double sampleIntervalMs = Missing;
+    std::string timeUnit = "ms";
+    std::string depthUnit = "m";
+    HorizonWindowSampleMode sampleMode = HorizonWindowSampleMode::ResampledFixedCount;
+    int fixedSampleCount = 0;                // ResampledFixedCount 时等于 K
+
+    // 逐道元数据（长度 = N 道）：每道携带各自的 [windowTopTimeMs, windowBottomTimeMs] 与 [windowTopDepthM, windowBottomDepthM]
+    std::vector<TraceHorizonWindowMeta> traces;
+
+    // 样点数组：
+    // - NativeVariableSamples：按 trace.sampleOffset .. +trace.nativeSampleCount 存放每道原生样点；
+    // - ResampledFixedCount：长度 = traces.size() * fixedSampleCount，行优先 [traceIdx * K + k]；
+    std::vector<float> amplitudes;
+
+    std::size_t validTraceCount = 0;
+    std::size_t reviewTraceCount = 0;
+    SeismicReadStatistics statistics;
 };
 
 }

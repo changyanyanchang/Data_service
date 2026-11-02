@@ -11,7 +11,7 @@ namespace {
 std::string u(const QString& v){return v.toUtf8().toStdString();}
 void issue(ParsedFile& p,const std::string& code,const std::string& text,int row=0,bool blocking=false){p.issues.push_back({code,text,"","",row,blocking});}
 ParsedFile failed(ParsedFile p,const std::string& error){p.status="failed";p.message=error;p.wells.clear();p.unassignedTimeDepth.clear();p.sourceTables.clear();issue(p,"TIME_DEPTH_ERROR",error,0,true);return p;}
-QStringList tokens(const QString& line){QStringList out;static QRegularExpression rx(R"re("([^"]*)"|(\S+))re");auto matches=rx.globalMatch(line);while(matches.hasNext()){auto m=matches.next();out.push_back(m.capturedStart(1)>=0?m.captured(1):m.captured(2));}return out;}
+QStringList tokens(const QString& line){QStringList out;thread_local const QRegularExpression rx(R"re("([^"]*)"|(\S+))re");auto matches=rx.globalMatch(line);while(matches.hasNext()){auto m=matches.next();out.push_back(m.capturedStart(1)>=0?m.captured(1):m.captured(2));}return out;}
 double numeric(const QString& text){bool ok=false;double v=text.toDouble(&ok);return ok&&std::isfinite(v)?v:Missing;}
 }
 ParsedFile parseTimeDepthFile(const std::string& path,const ParseOptions& options,const CancelCheck& cancelled){
@@ -47,7 +47,7 @@ ParsedFile parseTimeDepthFile(const std::string& path,const ParseOptions& option
     if(!ended)return failed(out,"时深表头不完整");auto column=[&](const QString& name){for(int i=0;i<header.size();++i)if(header[i].compare(name,Qt::CaseInsensitive)==0)return i;return -1;};
     const int md=column("MD"),well=column("Well"),x=column("X"),y=column("Y"),z=column("Z");int time=column("TWT picked");if(time<0)time=column("TWT");std::string timeType="TWT";if(time<0){time=column("OWT");timeType="OWT";}
     if(md<0||well<0||time<0)return failed(out,"Petrel时深表未包含明确 MD、Well 和 TWT/OWT 列");
-    QHash<QString,int> byWell;int dataRows=0,invalid=0,negative=0;bool duplicateDepth=false;static const QRegularExpression placeholder("^(WELL[ _]*[0-9]+|UNKNOWN|UNDEFINED)$",QRegularExpression::CaseInsensitiveOption);
+    QHash<QString,int> byWell;int dataRows=0,invalid=0,negative=0;bool duplicateDepth=false;thread_local const QRegularExpression placeholder("^(WELL[ _]*[0-9]+|UNKNOWN|UNDEFINED)$",QRegularExpression::CaseInsensitiveOption);
     while(!in.atEnd()){
         const auto original=in.readLine();const auto line=original.trimmed();++row;if(row<=33){preview.rowCount=row;preview.cells.push_back({row,1,u(original)});}if(line.isEmpty()||line.startsWith('#'))continue;if(cancelled&&cancelled())return failed(out,"时深解析已取消");
         const auto cells=tokens(line);if(cells.size()!=header.size())return failed(out,"时深记录列数与表头不符，第 "+std::to_string(row)+" 行");++dataRows;

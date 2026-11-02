@@ -145,6 +145,118 @@ struct LegacyUnitResolution {
     std::string reason;
 };
 
+// 导入/建项期：由地震层位 + 时深关系自动建立井震统一地层框架与四等分小层（T70-T72 / T70-T72-S1..S4）。
+struct SeismicStratigraphyBuildOptions {
+    std::string schemeId = "default";
+    std::string schemeName = "地震层序地层方案（四等分小层）";
+    double searchRadiusMeters = 500.0; // 井轨迹/井口匹配层位网格的最大搜索半径（m）
+    int subIntervalCount = SubIntervalCount; // 默认 4（S1..S4 四等分）
+    bool autoDetectTimeSign = true;    // 自动识别负 TWT（如 Petrel checkshot 海拔以下为负）并转为正双程时
+    bool materializeWellTracks = true; // 同步在井上生成 '地震层位' 与 '地震小层' 分层道及 '地震层位标志层'
+    bool overwriteExistingTracks = true;
+};
+
+struct SeismicStratigraphyBuildReport {
+    std::string schemeId;
+    InterpretationRevisionId revision;
+    int horizonCount = 0;       // 参与排序建模的地震层位数（如 T30..Tg 共 14 个）
+    int intervalCount = 0;      // 相邻层位构成的父层位单元数（如 T70-T72 等）
+    int subIntervalCount = 0;   // 细化生成的四等分小层总数（intervalCount * 4）
+    int matchedWellCount = 0;   // 成功通过时深表关联并生成层位/小层的井数
+    int skippedWellCount = 0;   // 缺少时深表或不在层位覆盖范围内的井数
+    std::vector<std::string> orderedHorizonNames; // 顶→底排序后的层位名列表
+    std::vector<std::string> warnings;
+};
+
+// 测井地层道来源类型：统一支持地震派生小层/层位道与常规地质分层道。
+enum class StratigraphicTrackSource {
+    SeismicFramework,   // 地震层位/小层体系（StratigraphicScheme: T70-T72 或 T70-T72-S1..S4）
+    WellIntervalTrack   // 井内分层道（tracks 表：'地震小层'、'地震层位'、'组'、'段' 或其他地层道）
+};
+
+struct StratigraphicTrackDescriptor {
+    StratigraphicTrackSource source = StratigraphicTrackSource::WellIntervalTrack;
+    std::string schemeId;       // SeismicFramework 时为方案 ID（如 "default"）
+    std::string trackName;      // 道名称（如 "地震小层", "地震层位", "组", "段"）
+    std::string trackType;      // 道类别
+    std::vector<std::string> unitNames; // 该道下包含的层位/小层单元名称列表（顶→底排序）
+    int wellCount = 0;          // 拥有该地层道的井数
+};
+
+struct WellStratigraphicSelector {
+    StratigraphicTrackSource source = StratigraphicTrackSource::SeismicFramework;
+    std::string schemeId = "default";
+    std::string revision;       // 空表示当前头修订
+    SubIntervalId subIntervalId;// 优先：四等分小层 ID（如 "T70-T72-S1"）
+    IntervalId intervalId;      // 备选：父层段 ID（如 "T70-T72"）
+    std::string trackName;      // WellIntervalTrack 时的分层道名（如 "段"、"组"、"地震小层"）；空则匹配任意道
+    std::string unitName;       // 层位/小层显示名（如 "T70-T72-S1"、"T70-T72"、"文昌组"、"文三段"）
+};
+
+struct WellIntervalLogQuery {
+    std::vector<long long> wellIds;        // 空表示查询工区全部有效井
+    WellStratigraphicSelector stratigraphy;// 地层/小层选择器（支持地震地层道与其他地层道）
+    std::vector<std::string> curveNames;   // 需提取的测井曲线名（如 {"GR","DT","RT","RHOB"}；空表示全部曲线）
+    bool processed = true;                 // true 使用清洗/处理后曲线值
+    bool includeAuxiliaryIntervals = true; // 同时返回该深度窗内的岩性/测井解释结论等辅助道切片
+    double resampleStepMeters = 0.0;       // <=0 保留原深度轴；>0 按指定步长（m）对齐公共深度轴
+    int normalizedSampleCount = 0;         // >0 时额外输出 [0,1] 相对深度重采样（如 64 点供神经网络输入）
+};
+
+struct IntervalRecord {
+    long long id = 0;         // 此层段的数据库编号，修改或删除时使用。
+    long long trackId = 0;    // 所属分层道编号；同一口井可以有多套不同分层解释。
+    GeologicalInterval value; // 真正的层段数据：名称、顶深、底深、岩性/相等。
+};
+
+struct FeatureColumn {
+    long long curveId = 0;
+    std::string name, unit;
+    std::vector<double> values; // 这条曲线在公共深度轴上的数值。
+    std::vector<unsigned char> quality;
+};
+
+// 供后续算法使用的多曲线特征表：一个公共深度轴，多列曲线数值。
+// columns[j].values[i] 表示第 j 条曲线在 depths[i] 处的数值。
+struct WellFeatureTable {
+    long long wellId = 0;
+    std::string depthUnit;
+    std::vector<double> depths;
+    std::vector<FeatureColumn> columns;
+};
+
+struct IntervalTrackResult {
+    long long trackId = 0, wellId = 0;
+    std::string name;
+    DepthInfo depthInfo;
+    std::vector<IntervalRecord> intervals;
+};
+
+struct WellStratigraphicLogSlice {
+    long long wellId = 0;
+    std::string wellName;
+    double wellheadX = Missing, wellheadY = Missing;
+
+    // 命中的地层/小层范围信息
+    std::string unitId;         // 如 "T70-T72-S1"
+    std::string unitName;       // 如 "T70-T72-S1" 或 "文三段"
+    std::string trackName;      // 来源道名称（如 "地震小层"、"段"）
+    std::string depthType = "MD", depthUnit = "m";
+    double topDepth = Missing, bottomDepth = Missing;
+    double topTimeMs = Missing, bottomTimeMs = Missing; // 若具备时深表，同步给出顶底 TWT(ms)
+    double thickness = Missing;
+    bool resolved = false;
+    std::string unresolvedReason;
+
+    // 截取并对齐后的多曲线特征表（depths + columns[GR, DT, ...]）
+    WellFeatureTable featureTable;
+    // 若 normalizedSampleCount > 0，按相对深度 [0,1] 等距重采样的特征表
+    WellFeatureTable normalizedFeatureTable;
+
+    // 该层段深度窗内的辅助分层道记录（如岩性道、电测解释道、已有相标签）
+    std::vector<IntervalTrackResult> auxiliaryTracks;
+};
+
 namespace framework {
 // 由有序界面派生相邻父单元及其四个子层段；复用已有同顶底的单元 ID。
 // 不把 N 个界面当 N 个单元：N 个有效界面恰得 N-1 个父单元。
@@ -155,6 +267,9 @@ std::vector<const StratigraphicSubInterval*> subIntervalsOf(const StratigraphicS
 const StratigraphicSubInterval* findSubInterval(const StratigraphicScheme& scheme, const SubIntervalId& id);
 const StratigraphicInterval* findInterval(const StratigraphicScheme& scheme, const IntervalId& id);
 const StratigraphicBoundary* findBoundary(const StratigraphicScheme& scheme, const BoundaryId& id);
+// 兼容稳定 ID 与人类可读层位名（如 "T70-T72-S1"、"T70–T72/S1"、"T70-T72"）：
+const StratigraphicInterval* resolveInterval(const StratigraphicScheme& scheme, const std::string& idOrName);
+const StratigraphicSubInterval* resolveSubInterval(const StratigraphicScheme& scheme, const std::string& idOrName);
 std::string displayName(const StratigraphicScheme& scheme, const IntervalId& id);
 std::string displayName(const StratigraphicScheme& scheme, const SubIntervalId& id);
 WellSubIntervalRange wellRange(const StratigraphicScheme& scheme, long long wellId, const SubIntervalId& id);
