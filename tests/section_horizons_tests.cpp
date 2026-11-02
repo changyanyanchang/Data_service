@@ -40,6 +40,11 @@ int main(int argc,char** argv){
       check(it!=result.curves.end(),"expected curve "+name);return *it;
     };
     check(result.curves.size()==6,"three major horizons plus three internal edges");
+    check(result.bands.size()==5,"explicit major interval plus four subinterval bands");
+    check(result.bands[1].topCurveId==named("T70").id&&result.bands[4].bottomCurveId==named("T72").id,
+          "bands use scheme surface links, never negative horizon or display sorting");
+    check(result.bands[2].topCurveId==result.bands[1].bottomCurveId&&result.bands[2].subdivision==2,
+          "S2 shares the actual S1/S2 edge");
     check(named("T70").timesMs[0]==100&&std::abs(named("T70").timesMs[1]-110)<1e-9,"exact OWT seconds and bounded interpolation become TWT ms");
     check(std::isnan(named("T70").timesMs[2])&&std::isnan(named("T70").timesMs[3])&&std::isnan(named("T70").timesMs[4]),"explicit null, missing trace and outside remain gaps");
     check(named("T70").timesMs[5]==100&&named("NEG").timesMs[0]==-9,"duplicate column order and signed source time preserved");
@@ -52,7 +57,7 @@ int main(int argc,char** argv){
     const auto updated=std::find_if(result.curves.begin(),result.curves.end(),[](const auto& c){return c.internalEdge==1;});
     check(updated!=result.curves.end()&&!updated->provisional&&updated->timesMs[0]==104,"scheme revision changes actual edge, not fixed quartiles");
     query.revision=oldRevision;check(ds.readSectionHorizons(query,result,error),error);
-    check(result.revision==oldRevision,"explicit historical revision retained");
+    check(result.revision==oldRevision&&result.bands.size()==5,"explicit historical revision and band topology retained");
     check(!ds.readSectionHorizons(query,result,error,[]{return true;})&&result.curves.empty(),"cancel has no stale output");
     check(ds.readSectionHorizons(query,result,error),"read snapshot released after cancellation");
     ds.closeProject();check(QFile::remove(file),"external volume removed to prove metadata-only query");

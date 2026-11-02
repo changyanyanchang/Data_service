@@ -23,9 +23,14 @@ struct SectionHorizonCurve {
     bool provisional=false;
     std::vector<double> timesMs; // one value per displayed column; NaN breaks the curve
 };
+struct SectionHorizonBand {
+    std::string id, name, topCurveId, bottomCurveId;
+    int subdivision=0; // 0 = whole major interval, 1..4 = S1..S4
+};
 struct SectionHorizonResult {
     std::string schemeId, revision;
     std::vector<SectionHorizonCurve> curves;
+    std::vector<SectionHorizonBand> bands; // explicit scheme topology; never inferred by screen ordering
     std::vector<std::string> warnings;
 };
 }

@@ -105,12 +105,15 @@ bool DataService::readSectionHorizons(const SectionHorizonQuery& query,SectionHo
         for(const auto& interval:scheme.intervals){
             const auto top=byResource.find(boundary[interval.top.value]),bottom=byResource.find(boundary[interval.bottom.value]);
             if(top==byResource.end()||bottom==byResource.end()||interval.status!="valid")continue;
+            const auto topId=next.curves[top->second].id,bottomId=next.curves[bottom->second].id;
+            const auto parentName=next.curves[top->second].name+"–"+next.curves[bottom->second].name;
+            next.bands.push_back({interval.id.value,parentName,topId,bottomId,0});
             const auto division=std::find_if(scheme.divisions.begin(),scheme.divisions.end(),[&](const auto& d){return d.interval==interval.id;});
             if(division==scheme.divisions.end())continue;
             const auto fractions=division->fractions;
             if(!(fractions[0]>0&&fractions[0]<fractions[1]&&fractions[1]<fractions[2]&&fractions[2]<1))continue;
             const auto topTimes=next.curves[top->second].timesMs,bottomTimes=next.curves[bottom->second].timesMs;
-            const auto parentName=next.curves[top->second].name+"–"+next.curves[bottom->second].name;
+            std::vector<std::string> edges{topId};
             for(int edge=0;edge<3;++edge){
                 if(stopped())return false;
                 if((next.curves.size()+1)*query.columns.size()>8000000){error="层位叠加超出点数预算";return false;}
@@ -121,8 +124,13 @@ bool DataService::readSectionHorizons(const SectionHorizonQuery& query,SectionHo
                     const double t=topTimes[col],b=bottomTimes[col];
                     curve.timesMs.push_back(std::isfinite(t)&&std::isfinite(b)&&b>t?t+(b-t)*fractions[edge]:Missing);
                 }
-                if(finiteCurve(curve))next.curves.push_back(std::move(curve));
+                if(!finiteCurve(curve))break;
+                edges.push_back(curve.id);next.curves.push_back(std::move(curve));
             }
+            if(edges.size()!=4)continue;
+            edges.push_back(bottomId);
+            for(int sub=1;sub<=4;++sub)next.bands.push_back({interval.id.value+":S"+std::to_string(sub),
+                parentName+"/S"+std::to_string(sub),edges[sub-1],edges[sub],sub});
         }
     }
     if(stopped())return false;
