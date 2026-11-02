@@ -24,7 +24,7 @@ class GridSampler {
             x=q.value(0).toInt();return value(q.value(1));
         };
         const double a=at(left_,xl-radius_,xl,lo),b=at(right_,xl,xl+radius_,hi);
-        if(!std::isfinite(a)||!std::isfinite(b))return Missing;
+        if(!std::isfinite(a)||!std::isfinite(b)||hi-lo>radius_)return Missing;
         return hi==lo?a:a+(b-a)*double(xl-lo)/(hi-lo);
     }
 public:
@@ -51,6 +51,7 @@ public:
         };
         int lo=il,hi=il;
         if(!line(below_,il-radius_,il,lo)||!line(above_,il,il+radius_,hi))return Missing;
+        if(hi-lo>radius_)return Missing;
         int leftA=xl,rightA=xl,leftB=xl,rightB=xl;
         const double a=row(lo,xl,leftA,rightA,error);if(lo==hi)return a;
         const double b=row(hi,xl,leftB,rightB,error);

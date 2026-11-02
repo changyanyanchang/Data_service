@@ -64,6 +64,7 @@ int main(int argc,char** argv){
     check(ds.openProjectReadOnly(root,error),error);check(ds.readSectionHorizons(query,result,error)&&result.curves.size()==7,"readonly reopen works without SEG-Y amplitudes");
     query.columns={{120,220,true}};query.revision.clear();check(ds.readSectionHorizons(query,result,error),error);
     check(named("SPARSE").timesMs[0]==250&&result.bands.empty(),"40-line sparse grid interpolates; unrelated surfaces do not invent intervals");
+    query.interpolationRadius=30;check(ds.readSectionHorizons(query,result,error)&&result.curves.empty(),"oversize cells do not create isolated interpolated islands at their centre");
     query.interpolationRadius=2;check(ds.readSectionHorizons(query,result,error)&&result.curves.empty(),"explicit small neighbourhood remains bounded");
     query.columns.clear();check(!ds.readSectionHorizons(query,result,error)&&result.curves.empty(),"invalid query clears old data");
     std::cout<<"section horizon overlays: order, gaps, signed time, units, scheme revisions, cancellation and readonly metadata passed\n";
