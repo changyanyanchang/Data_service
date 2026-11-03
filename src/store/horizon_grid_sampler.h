@@ -5,7 +5,8 @@
 #include <limits>
 namespace paleo::data::detail {
 // Exact picks win, including explicit nulls. Only a complete enclosing local
-// grid cell may be interpolated; neither null corners nor outside coverage extend.
+// local rows may be interpolated; each row must bracket the requested crossline.
+// Unequally sampled rows need not share crossline endpoints. Nulls never extend.
 class GridSampler {
     QSqlQuery exact_,below_,above_,left_,right_;
     long long horizon_;int radius_;
@@ -25,8 +26,8 @@ public:
       :exact_(store.db),below_(store.db),above_(store.db),left_(store.db),right_(store.db),horizon_(horizon),radius_(radius){}
     bool prepare(std::string& error){
         if(exact_.prepare("SELECT z FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no=? AND crossline_no=? ORDER BY seq,id LIMIT 1")&&
-           below_.prepare("SELECT inline_no FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no BETWEEN ? AND ? ORDER BY inline_no DESC LIMIT 1")&&
-           above_.prepare("SELECT inline_no FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no BETWEEN ? AND ? ORDER BY inline_no LIMIT 1")&&
+           below_.prepare("SELECT inline_no FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no BETWEEN ? AND ? AND crossline_no BETWEEN ? AND ? GROUP BY inline_no HAVING MIN(crossline_no)<=? AND MAX(crossline_no)>=? AND MIN(CASE WHEN crossline_no>=? THEN crossline_no END)-MAX(CASE WHEN crossline_no<=? THEN crossline_no END)<=? ORDER BY inline_no DESC LIMIT 1")&&
+           above_.prepare("SELECT inline_no FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no BETWEEN ? AND ? AND crossline_no BETWEEN ? AND ? GROUP BY inline_no HAVING MIN(crossline_no)<=? AND MAX(crossline_no)>=? AND MIN(CASE WHEN crossline_no>=? THEN crossline_no END)-MAX(CASE WHEN crossline_no<=? THEN crossline_no END)<=? ORDER BY inline_no LIMIT 1")&&
            left_.prepare("SELECT crossline_no,z FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no=? AND crossline_no BETWEEN ? AND ? ORDER BY crossline_no DESC,seq,id LIMIT 1")&&
            right_.prepare("SELECT crossline_no,z FROM horizon_points INDEXED BY horizon_line WHERE horizon_id=? AND inline_no=? AND crossline_no BETWEEN ? AND ? ORDER BY crossline_no,seq,id LIMIT 1"))return true;
         error="层位网格查询准备失败";return false;
@@ -40,6 +41,8 @@ public:
         if(!radius_)return Missing;
         const auto line=[&](QSqlQuery& q,int lo,int hi,int& number){
             q.finish();q.bindValue(0,horizon_);q.bindValue(1,lo);q.bindValue(2,hi);
+            q.bindValue(3,xl-radius_);q.bindValue(4,xl+radius_);q.bindValue(5,xl);q.bindValue(6,xl);
+            q.bindValue(7,xl);q.bindValue(8,xl);q.bindValue(9,radius_);
             if(!q.exec()){error=s(q.lastError().text());return false;}
             if(!q.next())return false;
             number=q.value(0).toInt();return true;
@@ -50,7 +53,7 @@ public:
         int leftA=xl,rightA=xl,leftB=xl,rightB=xl;
         const double a=row(lo,xl,leftA,rightA,error);if(lo==hi)return a;
         const double b=row(hi,xl,leftB,rightB,error);
-        if(!std::isfinite(a)||!std::isfinite(b)||leftA!=leftB||rightA!=rightB)return Missing;
+        if(!std::isfinite(a)||!std::isfinite(b))return Missing;
         return a+(b-a)*double(il-lo)/(hi-lo);
     }
 };

@@ -22,6 +22,15 @@ int main(int argc,char** argv){
         surface.points.push_back({i,x,500000.+x,4000000.+i,time});
       }
       if(h==0)surface.points.push_back({104,202,500202,4000104,Missing});
+      // A picked row elsewhere on the surface must not hide the local cell.
+      if(h==1){
+        surface.points.push_back({102,500,500500,4000102,999});
+        // A nearer row with an overwide crossline gap cannot mask the bounded cell.
+        for(int x:{160,244})surface.points.push_back({102,x,500000.+x,4000102.,145.+(x-200)*5.});
+        // Local adjacent rows can have different crossline sampling. Both still
+        // bracket the requested crossline, with a plane providing an exact oracle.
+        for(int x:{201,205})surface.points.push_back({103,x,500000.+x,4000103.,147.5+(x-200)*5.});
+      }
       parsed.horizons.push_back(surface);
     }
     long long sourceId=0;
@@ -48,6 +57,12 @@ int main(int argc,char** argv){
     check(named("T70").timesMs[0]==100&&std::abs(named("T70").timesMs[1]-110)<1e-9,"exact OWT seconds and bounded interpolation become TWT ms");
     check(std::isnan(named("T70").timesMs[2])&&std::isnan(named("T70").timesMs[3])&&std::isnan(named("T70").timesMs[4]),"explicit null, missing trace and outside remain gaps");
     check(named("T70").timesMs[5]==100&&named("NEG").timesMs[0]==-9,"duplicate column order and signed source time preserved");
+    const auto originalColumns=query.columns;query.columns={{102,202,true}};
+    check(ds.readSectionHorizons(query,result,error),error);
+    check(std::abs(named("T72").timesMs[0]-155)<1e-9,"choose enclosing rows at the requested crossline, not a distant partial row");
+    const auto blocked=std::find_if(result.curves.begin(),result.curves.end(),[](const auto &c){return c.name=="T70";});
+    check(blocked==result.curves.end()||std::isnan(blocked->timesMs[0]),"a local explicit-null corner still blocks interpolation");
+    query.columns=originalColumns;check(ds.readSectionHorizons(query,result,error),error);
     const auto edge=std::find_if(result.curves.begin(),result.curves.end(),[](const auto& c){return c.internalEdge==1;});
     check(edge!=result.curves.end()&&edge->provisional&&edge->timesMs[0]==110&&std::isnan(edge->timesMs[2]),"provisional S1/S2 follows both actual surfaces, gaps retained");
     const auto oldRevision=committed.revision.value;
