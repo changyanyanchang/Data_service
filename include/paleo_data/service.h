@@ -379,7 +379,7 @@ public:
     static bool readSeismicFileLine(const std::string& path, const std::string& direction, int lineNumber,
         const SectionReadOptions& options, SeismicSectionResult& result, std::string& error, const CancelCheck& cancelled={});
     static bool readSeismicFileTimeSlice(const std::string& path, double timeMs, const TimeSliceReadOptions& options,
-        SeismicTimeSliceResult& result, std::string& error, const CancelCheck& cancelled={});
+        SeismicTimeSliceResult& result, std::string& error, const CancelCheck& cancelled={}, const TimeSliceTileCallback& tileReady={});
     // Ordered inline/crossline path, independent of unconfirmed map-coordinate conventions.
     bool readSeismicGridSection(long long volumeId, const std::vector<std::pair<int,int>>& path,
         int maxColumns, bool interpolate, bool keepOutside, SeismicSectionResult& result, std::string& error, const CancelCheck& cancelled={});

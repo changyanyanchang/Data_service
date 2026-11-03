@@ -157,6 +157,9 @@ int main(int argc,char** argv){
         auto opt=options();opt.ioMode="legacy";opt.workerCount=1;SeismicTimeSliceResult baseline;
         check(service.readSeismicTimeSlice(entry.id,108,opt,baseline,error),error);
         check(std::isnan(baseline.amplitudes[2*73+3]),"missing source cell remains NaN");
+        auto fileOptions=options();fileOptions.workerCount=2;SeismicTimeSliceResult fileResult;int fileCallbacks=0;
+        check(DataService::readSeismicFileTimeSlice(utf8(path),108,fileOptions,fileResult,error,{},[&](const SeismicTimeSliceTile&){++fileCallbacks;}),error);
+        compare(baseline,fileResult);check(fileCallbacks>1&&fileResult.statistics.completedTiles==fileCallbacks,"detached file forwards tile callbacks");
         const auto caller=std::this_thread::get_id();
         for(const auto& mode:modes())for(int workers:{1,2,4}){
             opt.ioMode=mode;opt.workerCount=workers;SeismicTimeSliceResult result;
