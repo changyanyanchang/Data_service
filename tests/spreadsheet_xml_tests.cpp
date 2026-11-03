@@ -57,6 +57,9 @@ int main(int argc,char** argv){
         ParseOptions confirmed;confirmed.comprehensiveWellMetreDepth=true;
         const auto declared=parse(path,confirmed);
         check(declared.wells[0].wellbore.logSets[0].depthInfo.depthUnit=="m"&&declared.wells[0].wellbore.logSets[0].depthInfo.depthType=="MD","explicit host comprehensive-export contract");
+        for(const auto &track:declared.wells[0].wellbore.intervalTracks)
+            check(track.depthInfo.depthType=="MD"&&track.depthInfo.depthUnit=="m","confirmed MD top/base columns need not be adjacent or first");
+        check(p.wells[0].wellbore.intervalTracks[0].depthInfo.depthType.empty(),"generic interleaved intervals remain undeclared");
         check(w.wellbore.intervalTracks.size()==3&&w.wellbore.intervalTracks[0].trackType=="沉积相","text facies maps to interval model");
         check(w.wellbore.intervalTracks[0].intervals[0].intervalName=="分流河道"&&w.wellbore.intervalTracks[0].sourceSheet=="文本道","Chinese value and provenance");
         check(w.wellbore.intervalTracks[1].intervals[0].bottomNotPenetrated==1&&w.wellbore.intervalTracks[1].intervals[0].topUnconformity==0,"formation flags");

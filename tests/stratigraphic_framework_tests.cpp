@@ -1,6 +1,7 @@
 // 统一地层层段体系契约测试：合成工区 T70/T71/T72 → 2 个父单元 → 8 个子层段。
 #include "paleo_data/service.h"
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
@@ -266,7 +267,7 @@ static void seismicStratigraphyAndQueryApis()
 
     // 1. 准备含 3 个倾斜地震层位 (T70, T72, T80)、带负 TWT 的时深关系、测井曲线 (GR, DT) 与地质分层道 (组/段) 的数据包
     ParsedFile parsed;
-    parsed.kind = "synthetic";
+    parsed.kind = "synthetic";parsed.status="parsed";
     for (auto [hname, baseTwt] : {std::pair{"T80", 1320.0}, {"T70", 1040.0}, {"T72", 1160.0}}) {
         SeismicHorizon h;
         h.horizonName = hname;
@@ -350,10 +351,11 @@ static void seismicStratigraphyAndQueryApis()
 
     // 借用内部 ProjectStore 保存合成井与层位（或通过 SQL/importPreparedFile）
     // 计算 dummySrc 的 SHA-256 以调用 importPreparedFile
-    CHECK(ds.importPreparedFile(dummySrc.toUtf8().toStdString(), dummySrc.toUtf8().toStdString(),
+    const bool imported=ds.importPreparedFile(dummySrc.toUtf8().toStdString(), dummySrc.toUtf8().toStdString(),
                                 dummySrc.toUtf8().toStdString(),
-                                "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
-                                parsed, srcId, err));
+                                QCryptographicHash::hash(QByteArray("synthetic"),QCryptographicHash::Sha256).toHex().toStdString(),
+                                parsed, srcId, err);
+    CHECK(imported);if(!imported){std::cerr<<"framework fixture import: "<<err<<"\n";return;}
 
     // 2. 调用 buildSeismicStratigraphicFramework 自动建立井震统一地层方案与四等分小层
     SeismicStratigraphyBuildOptions buildOpts;
@@ -412,7 +414,7 @@ static void seismicStratigraphyAndQueryApis()
     CHECK(logSlices[0].featureTable.columns.size() == 2);
     CHECK(!logSlices[0].featureTable.depths.empty());
     CHECK(near(logSlices[0].featureTable.depths.front(), 1640.0));
-    CHECK(near(logSlices[0].featureTable.depths.back(), 1700.0));
+    CHECK(near(logSlices[0].featureTable.depths.back(), 1698.0));
     CHECK(logSlices[0].normalizedFeatureTable.depths.size() == 16);
 
     // 3b. 查询其他地层道：段 / 文三段（1560..1840 m）
@@ -429,6 +431,7 @@ static void seismicStratigraphyAndQueryApis()
 
     // 4. 验证 readSeismicHorizonWindow：每个空间点具有不同的时间窗与深度窗
     SeismicHorizonWindowQuery winQ;
+    winQ.undeclaredTimeUnit="ms";winQ.undeclaredTimeType="TWT";
     winQ.target.subIntervalId = SubIntervalId{"T70-T72-S2"}; // S2 = [0.25, 0.50]
     winQ.domainKind = HorizonSpatialDomainKind::FullHorizonGrid;
     winQ.sampleMode = HorizonWindowSampleMode::ResampledFixedCount;

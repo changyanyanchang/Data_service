@@ -60,6 +60,7 @@ int main(int argc,char** argv) {
         p=parseFile(logs,{},[]{return true;});check(p.status=="failed"&&p.wells.empty(),"cancellation no partial result");
         const auto las=write(temp.path(),"HZ4-4-4.las",QByteArray("~Version\nVERS. 2.0 : version\nWRAP. NO : wrap\n~Well\nWELL. HZ4-4-4 : well\nNULL. -12345 : declared null\n~Curve\nDEPT.M : depth\nGR.API : gamma ray\nSP.MV : signed potential\n~ASCII\n100 20 -30\n101 -12345 -31\n"));
         p=parseFile(las);check(p.wells.size()==1&&p.declaredNullValues.size()==1&&p.declaredNullValues[0]==-12345,"LAS declared null");check(p.wells[0].wellbore.logSets[0].logCurves[0].sampleValues[1]==-12345,"LAS raw null");
+        check(p.wells[0].wellbore.logSets[0].depthInfo.depthType=="MD","LAS DEPT is measured depth");
         std::cout<<"Synthetic parser checks passed\n";
         // Optional local acceptance checks are shape-based: no private dataset
         // identities, coordinates, or expected measurements are embedded here.

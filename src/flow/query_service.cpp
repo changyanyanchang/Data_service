@@ -1,4 +1,5 @@
 #include "store/project_store.h"
+#include "planar_coordinates.h"
 #include <QDir>
 #include <QJsonDocument>
 #include <algorithm>
@@ -8,7 +9,7 @@ namespace paleo::data {
 using namespace detail;
 DataService::DataService():impl_(std::make_unique<Impl>()){}
 DataService::~DataService()=default;
-bool DataService::createProject(const std::string& path,const std::string& name,std::string& error){if(name.empty()){error="工区名称不能为空";return false;}return impl_->store.open(q(path),true,q(name),error);}
+bool DataService::createProject(const std::string& path,const std::string& name,std::string& error){if(name.empty()){error="工区名称不能为空";return false;}if(!impl_->store.open(q(path),true,q(name),error))return false;if(!impl_->store.updateProjectCoordinateSystem(error)){impl_->store.close();return false;}return true;}
 bool DataService::openProject(const std::string& path,std::string& error){
     if(!impl_->store.open(q(path),false,{},error))return false;
     if(!impl_->store.updateProjectCoordinateSystem(error)){impl_->store.close();return false;}
@@ -36,16 +37,16 @@ bool DataService::listWells(std::vector<WellSummary>& out,std::string& e)const{
     while(r.next())out.push_back({r.value(0).toLongLong(),s(r.value(1).toString()),r.value(2).toInt(),r.value(3).toInt(),r.value(4).toInt(),r.value(5).toInt(),r.value(6).toInt(),r.value(7).toInt(),r.value(8).toBool(),r.value(9).toInt(),r.value(10).toInt(),r.value(11).toInt()});return true;
 }
 bool DataService::readWellInfo(long long id,WellInfo& w,std::string& e)const{
-    QSqlQuery r;if(!impl_->store.exec("SELECT name,field_name,well_type,x,y,crs,unit,total_depth,remark FROM wells WHERE id=?",{id},e,&r))return false;if(!r.next()){e="井不存在";return false;}w.wellName=s(r.value(0).toString());w.fieldName=s(r.value(1).toString());w.wellType=s(r.value(2).toString());w.wellheadX=value(r.value(3));w.wellheadY=value(r.value(4));w.coordinateSystem=s(r.value(5).toString());w.coordinateUnit=s(r.value(6).toString());w.totalDrilledDepth=value(r.value(7));w.remark=s(r.value(8).toString());return true;
+    QSqlQuery r;if(!impl_->store.exec("SELECT name,field_name,well_type,x,y,crs,unit,total_depth,remark FROM wells WHERE id=?",{id},e,&r))return false;if(!r.next()){e="井不存在";return false;}w.wellName=s(r.value(0).toString());w.fieldName=s(r.value(1).toString());w.wellType=s(r.value(2).toString());w.wellheadX=value(r.value(3));w.wellheadY=value(r.value(4));w.coordinateSystem=s(r.value(5).toString());w.coordinateUnit=s(r.value(6).toString());w.totalDrilledDepth=value(r.value(7));w.remark=s(r.value(8).toString());return readPlanarCoordinates(*this,w.coordinateSystem,w.coordinateUnit,e);
 }
 bool DataService::listWellInfos(std::vector<WellInfoRecord>& out,std::string& e)const{
-    out.clear();QSqlQuery r;
+    out.clear();QSqlQuery r;ProjectCoordinates project;if(!readProjectCoordinates(project,e))return false;
     if(!impl_->store.exec("SELECT id,name,field_name,well_type,x,y,crs,unit,total_depth,remark FROM wells ORDER BY id",{},e,&r))return false;
     while(r.next()){
         WellInfoRecord row;row.id=r.value(0).toLongLong();auto& w=row.value;
         w.wellName=s(r.value(1).toString());w.fieldName=s(r.value(2).toString());w.wellType=s(r.value(3).toString());
         w.wellheadX=value(r.value(4));w.wellheadY=value(r.value(5));w.coordinateSystem=s(r.value(6).toString());
-        w.coordinateUnit=s(r.value(7).toString());w.totalDrilledDepth=value(r.value(8));w.remark=s(r.value(9).toString());out.push_back(std::move(row));
+        w.coordinateUnit=s(r.value(7).toString());w.totalDrilledDepth=value(r.value(8));w.remark=s(r.value(9).toString());inheritPlanarCoordinates(w.coordinateSystem,w.coordinateUnit,project);out.push_back(std::move(row));
     }return true;
 }
 static bool listEntries(const ProjectStore& store,const std::string& kind,long long wellId,long long sourceId,std::vector<DataEntry>& out,std::string& e){

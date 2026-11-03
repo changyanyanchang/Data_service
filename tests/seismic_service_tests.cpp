@@ -21,9 +21,59 @@ void fixture(const QString& path,bool coordinates=true){
 }
 long long importVolume(DataService& service,const QString& file,std::string& error){ImportReport report;ImportOptions options;options.copySources=false;check(service.importFile(utf8(file),options,report,error),error);std::vector<DataEntry> volumes;check(service.listData("volumes",0,volumes,error),error);check(!volumes.empty(),"volume registered");return volumes.back().id;}
 void confirm(DataService& service,long long id,std::string& error){SeismicVolume volume;check(service.readVolume(id,volume,error),error);check(volume.traces.empty(),"metadata must not load traces");volume.geometry.coordinateSystem="TEST_PROJECTED";volume.geometry.coordinateUnit="m";volume.sampling.firstTime=100;volume.sampling.sampleCount=8;volume.sampling.sampleInterval=2;volume.sampling.timeUnit="ms";volume.sampling.timeType="TWT";volume.sampling.timeReference="fixture datum";check(service.saveVolume(id,volume,error),error);}
+void projectCoordinates(const QTemporaryDir& temp){
+    DataService service;std::string error;const auto root=utf8(temp.path()+"/defaults");
+    check(service.createProject(root,"Default coordinates",error),error);
+    check(service.projectCrs()=="EPSG:32650"&&service.projectCrsUnit()=="m","new project defaults to EPSG:32650 / m");
+    const auto path=temp.path()+"/default.sgy";fixture(path);const auto id=importVolume(service,path,error);
+    QFile source(path);check(source.open(QIODevice::ReadOnly),"source before read");const auto original=source.readAll();source.close();
+    WellInfo well;well.wellName="DEFAULT-1";well.wellheadX=499900;well.wellheadY=3999900;
+    long long wellId=0;check(service.createWell(well,wellId,error),error);
+    SeismicVolume volume;check(service.readVolume(id,volume,error),error);
+    check(volume.geometry.coordinateSystem=="EPSG:32650"&&volume.geometry.coordinateUnit=="m","blank volume inherits default");
+    check(volume.sampling.timeReference.empty(),"planar default never invents a time datum");
+    service.closeProject();check(service.openProjectReadOnly(root,error),error);
+    WellInfo read;check(service.readWellInfo(wellId,read,error),error);
+    check(read.coordinateSystem=="EPSG:32650"&&read.coordinateUnit=="m"&&read.wellheadX==499900,"readonly well uses shared convention without changing XY");
+    ProjectPlanarRange area;check(service.readProjectPlanarRange(area,error),error);
+    check(area.status=="complete"&&area.merged.valid&&area.merged.coordinateSystem=="EPSG:32650"&&area.merged.coordinateUnit=="m","readonly default CRS permits complete area");
+    check(area.merged.minX==499900&&area.merged.maxX==500150&&area.merged.minY==3999900&&area.merged.maxY==4000200,"default area covers wells and full seismic range");
+    service.closeProject();check(service.openProject(root,error),error);
+    check(service.setProjectCrs("EPSG:32649","m",error),error);
+    check(service.readWellInfo(wellId,read,error)&&read.coordinateSystem=="EPSG:32649","blank well follows manual project CRS");
+    check(service.readVolume(id,volume,error)&&volume.geometry.coordinateSystem=="EPSG:32649","blank volume follows same manual project CRS");
+    volume.geometry.coordinateSystem="EPSG:32650";check(service.saveVolume(id,volume,error),error);
+    check(service.readProjectPlanarRange(area,error)&&area.status=="conventions-mismatch"&&!area.merged.valid,"explicit conflicting CRS never relabelled or merged");
+    SeismicSection section;section.sectionName="project path";section.pathPoints={{500000,4000000},{500150,4000200}};
+    long long sectionId=0;check(service.saveSection(sectionId,section,error),error);
+    check(service.readSection(sectionId,section,error)&&section.coordinateSystem=="EPSG:32649"&&section.coordinateUnit=="m","section shares project convention");
+    service.closeProject();check(service.openProjectReadOnly(root,error),error);
+    check(service.readVolume(id,volume,error)&&volume.geometry.coordinateSystem=="EPSG:32650","explicit source CRS survives readonly reopen");
+    check(source.open(QIODevice::ReadOnly)&&source.readAll()==original,"external SEG-Y is unchanged");
+}
+}
+static void pairedTimeDepth(const QTemporaryDir& temp){
+    DataService service;std::string error;check(service.createProject(utf8(temp.path()+"/paired"),"Pairing",error),error);
+    std::vector<long long> ids;
+    for(const auto& name:{QByteArray("A"),QByteArray("B")}){
+        const auto file=temp.filePath("td-"+QString::fromUtf8(name));QFile raw(file);check(raw.open(QIODevice::WriteOnly),"TD fixture");
+        raw.write("# Petrel checkshots format\n# Unit in depth: m\nVERSION 1\nBEGIN HEADER\nX\nY\nZ\nTWT picked\nMD\nWell\nEND HEADER\n1 2 -100 -50 110 "+name+"\n1 2 -200 -100 210 "+name+"\n");raw.close();
+        ImportReport report;check(service.importFile(utf8(file),{},report,error),error);
+    }
+    std::vector<DataEntry> entries;check(service.listData("time_depth",0,entries,error)&&entries.size()==2,error);for(const auto& entry:entries)ids.push_back(entry.id);
+    const auto file=temp.filePath("paired.sgy");fixture(file);const auto volumeId=importVolume(service,file,error);
+    check(!service.confirmTimeDepthAlignment(ids,"ms","TWT","shared zero",true,volumeId+999,error),"missing volume rejects whole pairing");
+    TimeDepthTable table;check(service.readTimeDepth(ids[0],table,error)&&table.timeUnit.empty()&&table.depthTimePairs[0].timeValue==-50,"failed pairing leaves source values and declarations unchanged");
+    check(service.confirmTimeDepthAlignment(ids,"ms","TWT","shared zero",true,volumeId,error),error);
+    for(auto id:ids)check(service.readTimeDepth(id,table,error)&&table.timeReference=="shared zero"&&table.depthTimePairs[0].timeValue==50,"both source families confirmed");
+    SeismicVolume volume;check(service.readVolume(volumeId,volume,error)&&volume.sampling.timeType=="TWT"&&volume.sampling.timeReference=="shared zero"&&volume.sampling.sampleInterval==2,"volume datum paired without resampling");
+    check(service.confirmTimeDepthAlignment(ids,"ms","TWT","shared zero",true,volumeId,error),error);
+    check(service.readTimeDepth(ids[0],table,error)&&table.depthTimePairs[0].timeValue==50,"repeat pairing does not negate twice");
+    check(service.confirmTimeDepthSemantics(ids[0],"ms","TWT","shared zero",false,error),error);
+    check(service.readTimeDepth(ids[0],table,error)&&table.depthTimePairs[0].timeValue==-50,"raw source values remain intact");
 }
 int main(int argc,char**argv){QCoreApplication app(argc,argv);QCoreApplication::setApplicationName("paleo-data-seismic-tests");try{
-    QTemporaryDir temp;check(temp.isValid(),"temporary directory");std::string error;DataService service;check(service.createProject(utf8(temp.path()+"/project"),"Seismic tests",error),error);
+    QTemporaryDir temp;check(temp.isValid(),"temporary directory");projectCoordinates(temp);pairedTimeDepth(temp);std::string error;DataService service;check(service.createProject(utf8(temp.path()+"/project"),"Seismic tests",error),error);
     const QString path=temp.path()+"/step2.sgy";fixture(path);const auto id=importVolume(service,path,error);SeismicTimeSliceResult slice;
     check(!service.readTimeSlice(id,104,{},slice,error)&&slice.amplitudes.empty(),"unknown reference rejected");confirm(service,id,error);
     TimeSliceReadOptions timeOptions;timeOptions.maxInlineCount=3;timeOptions.maxCrosslineCount=4;

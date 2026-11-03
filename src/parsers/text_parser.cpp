@@ -316,7 +316,9 @@ ParsedFile parseLas(ParsedFile out,QTextStream& input,const ParseOptions& option
     if(depth<0)return fail(std::move(out),"LAS 未识别到深度曲线，不能默认使用第一列");
     WellDataset well=makeWell(actual,out.path,options);LogSet set;set.logSetName=s(QFileInfo(q(out.path)).completeBaseName());set.sourceFile=out.path;
     set.depthInfo.depthUnit=s(units[depth]);if(set.depthInfo.depthUnit.empty())set.depthInfo.depthUnit=options.depthUnit;
-    if(mnemonics[depth].compare("MD",Qt::CaseInsensitive)==0)set.depthInfo.depthType="MD";
+    // The LAS depth selector above only accepts MD/DEPT/DEPTH. All are the
+    // measured-depth index contract; preserve its declared unit independently.
+    set.depthInfo.depthType="MD";
     std::vector<int> columns;for(int i=0;i<mnemonics.size();++i)if(i!=depth){LogCurve curve;curve.curveName=s(mnemonics[i]);curve.curveUnit=s(units[i]);set.logCurves.push_back(curve);columns.push_back(i);}
     for(const auto& values:rows){const double d=values[depth];set.samplingAxis.depthValues.push_back((declaredNull&&d==nullValue)?Missing:d);for(int c=0;c<columns.size();++c)set.logCurves[c].sampleValues.push_back(values[columns[c]]);}
     const auto& axis=set.samplingAxis.depthValues;

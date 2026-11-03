@@ -1103,9 +1103,16 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
                 WellFeatureTable rawTable;
                 if (prepareWellFeatures(wellId, curvesBySet[bestSetId], slice.topDepth, slice.bottomDepth,
                                         query.processed, rawTable, featErr)) {
+                    const bool exclusiveBottom=matchedSub&&matchedSub->index<SubIntervalCount;
+                    if(exclusiveBottom){
+                        while(!rawTable.depths.empty()&&rawTable.depths.back()>=slice.bottomDepth){
+                            const auto index=rawTable.depths.size()-1;rawTable.depths.pop_back();
+                            for(auto &column:rawTable.columns){if(column.values.size()>index)column.values.resize(index);if(column.quality.size()>index)column.quality.resize(index);}
+                        }
+                    }
                     if (query.resampleStepMeters > 0.0 && !rawTable.depths.empty()) {
                         std::vector<double> uniformDepths;
-                        for (double d = slice.topDepth; d <= slice.bottomDepth + 1e-9; d += query.resampleStepMeters)
+                        for (double d = slice.topDepth; exclusiveBottom?d<slice.bottomDepth:d<=slice.bottomDepth+1e-9; d += query.resampleStepMeters)
                             uniformDepths.push_back(d);
                         slice.featureTable = resampleFeatureTable(rawTable, uniformDepths, uniformDepths);
                     } else {
@@ -1117,7 +1124,7 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
                         std::vector<double> targetDepths(size_t(K), 0.0);
                         std::vector<double> relAxis(size_t(K), 0.0);
                         for (int k = 0; k < K; ++k) {
-                            const double f = (K == 1) ? 0.5 : (double(k) / double(K - 1));
+                            const double f = (K == 1) ? 0.5 : (double(k) / double(exclusiveBottom?K:K-1));
                             relAxis[size_t(k)] = f;
                             targetDepths[size_t(k)] = slice.topDepth + f * (slice.bottomDepth - slice.topDepth);
                         }

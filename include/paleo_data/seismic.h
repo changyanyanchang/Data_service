@@ -138,6 +138,7 @@ enum class HorizonSpatialDomainKind {
 };
 
 struct SeismicHorizonWindowQuery {
+    std::string undeclaredTimeUnit, undeclaredTimeType; // explicit convention for undeclared sources only
     long long volumeId = 0;                  // 地震体 ID（0 表示自动选用工区主三维地震体）
     SeismicStratigraphicTarget target;       // 目标小层（如 T70-T72-S1）或父层位（T70-T72）
     HorizonSpatialDomainKind domainKind = HorizonSpatialDomainKind::FullHorizonGrid;

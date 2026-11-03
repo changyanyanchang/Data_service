@@ -200,9 +200,8 @@ ParsedFile parseSpreadsheetXmlFile(const std::string& path,const ParseOptions& o
         auto& track=w.wellbore.intervalTracks[sh.tracks[key]];
         // The host explicitly confirms this comprehensive export's MD/metre
         // convention; generic interval spreadsheets retain unknown conventions.
-        if(options.comprehensiveWellMetreDepth && sh.header.size()>=3 &&
-           headerName(sh.header[0])==QStringLiteral("井号") &&
-           headerName(sh.header[1])==QStringLiteral("顶深") && headerName(sh.header[2])==QStringLiteral("底深")) {
+        if(options.comprehensiveWellMetreDepth && sh.well>=0 && sh.top>=0 && sh.bottom>=0 &&
+           headerName(sh.header[sh.top])==QStringLiteral("顶深") && headerName(sh.header[sh.bottom])==QStringLiteral("底深")) {
             track.depthInfo.depthType="MD";
             if(track.depthInfo.depthUnit.empty())track.depthInfo.depthUnit="m";
         }

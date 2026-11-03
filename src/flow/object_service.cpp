@@ -1,4 +1,5 @@
 #include "store/project_store.h"
+#include "planar_coordinates.h"
 #include <QJsonDocument>
 #include <QFileInfo>
 #include <cmath>
@@ -10,9 +11,18 @@ using namespace detail;
 static double jnumber(const QJsonValue& v){return v.isDouble()?v.toDouble():Missing;}
 bool DataService::readLogSet(long long id,bool processed,LogSet& result,std::string& e)const{
     result={};QSqlQuery r;
-    if(!impl_->store.exec("SELECT l.name,l.depth_json,l.depths,l.tvd,l.tvdss,l.step,l.sheet,s.stored_path FROM log_sets l LEFT JOIN sources s ON s.id=l.source_id WHERE l.id=?",{id},e,&r))return false;
+    if(!impl_->store.exec("SELECT l.name,l.depth_json,l.depths,l.tvd,l.tvdss,l.step,l.sheet,s.stored_path,s.options,s.kind,s.original_path FROM log_sets l LEFT JOIN sources s ON s.id=l.source_id WHERE l.id=?",{id},e,&r))return false;
     if(!r.next()){e="曲线组不存在";return false;}
     result.logSetName=s(r.value(0).toString());result.depthInfo=readDepth(object(r.value(1).toString()));
+    if(r.value(9).toString()=="workbook"&&object(r.value(8).toString())["comprehensiveWellMetreDepth"].toBool()){
+        if(result.depthInfo.depthType.empty())result.depthInfo.depthType="MD";
+        if(result.depthInfo.depthUnit.empty())result.depthInfo.depthUnit="m";
+    }else if(result.depthInfo.depthType.empty()&&r.value(9).toString()=="logs"&&
+             QFileInfo(r.value(10).toString()).suffix().compare("las",Qt::CaseInsensitive)==0){
+        // Old LAS imports lost MD on the accepted DEPT/DEPTH index. The format
+        // contract is available offline; this does not supply a missing unit.
+        result.depthInfo.depthType="MD";
+    }
     if(!unpack(r.value(2).toByteArray(),result.samplingAxis.depthValues,e)||!unpack(r.value(3).toByteArray(),result.samplingAxis.tvdValues,e)||!unpack(r.value(4).toByteArray(),result.samplingAxis.tvdssValues,e))return false;
     result.samplingAxis.sampleStep=value(r.value(5));result.sourceSheet=s(r.value(6).toString());result.sourceFile=s(impl_->store.absolutePath(r.value(7).toString()));
     if(!impl_->store.exec("SELECT name,unit,description,raw_values,processed_values FROM curves WHERE set_id=? ORDER BY id",{id},e,&r))return false;
@@ -35,13 +45,21 @@ bool DataService::readAttachment(long long id,Attachment& result,std::string& e)
     auto path=o["path"].toString();result.filePath=path.isEmpty()?std::string():s(impl_->store.absolutePath(path));result.attachmentType=s(o["type"].toString());result.targetType=s(o["targetType"].toString());result.targetId=o["targetId"].toInt();return true;
 }
 bool DataService::readIntervalTrackInfo(long long id,IntervalTrack& t,std::string& e)const{
-    t={};QSqlQuery r;if(!impl_->store.exec("SELECT t.name,t.type,t.depth_json,t.sheet,s.stored_path FROM tracks t LEFT JOIN sources s ON s.id=t.source_id WHERE t.id=?",{id},e,&r))return false;if(!r.next()){e="分层道不存在";return false;}t.trackName=s(r.value(0).toString());t.trackType=s(r.value(1).toString());t.depthInfo=readDepth(object(r.value(2).toString()));t.sourceSheet=s(r.value(3).toString());t.sourceFile=s(impl_->store.absolutePath(r.value(4).toString()));return true;
+    t={};QSqlQuery r;if(!impl_->store.exec("SELECT t.name,t.type,t.depth_json,t.sheet,s.stored_path,s.options,s.kind FROM tracks t LEFT JOIN sources s ON s.id=t.source_id WHERE t.id=?",{id},e,&r))return false;if(!r.next()){e="分层道不存在";return false;}t.trackName=s(r.value(0).toString());t.trackType=s(r.value(1).toString());t.depthInfo=readDepth(object(r.value(2).toString()));t.sourceSheet=s(r.value(3).toString());t.sourceFile=s(impl_->store.absolutePath(r.value(4).toString()));
+    // Older comprehensive workbook imports dropped the declaration when MD and
+    // TVD columns were interleaved. The source's explicit host contract remains
+    // authoritative offline; fill only missing components, without rewriting it.
+    if(r.value(6).toString()=="workbook"&&object(r.value(5).toString())["comprehensiveWellMetreDepth"].toBool()){
+        if(t.depthInfo.depthType.empty())t.depthInfo.depthType="MD";
+        if(t.depthInfo.depthUnit.empty())t.depthInfo.depthUnit="m";
+    }
+    return true;
 }
 bool DataService::readVolume(long long id,SeismicVolume& v,std::string& e)const{
     v={};QSqlQuery r;if(!impl_->store.exec("SELECT name,path,format,amplitude_unit,geometry,sampling FROM volumes WHERE id=?",{id},e,&r))return false;if(!r.next()){e="地震体不存在";return false;}
     v.volumeId=int(id);v.volumeName=s(r.value(0).toString());v.dataFile=s(impl_->store.absolutePath(r.value(1).toString()));v.fileFormat=s(r.value(2).toString());v.amplitudeUnit=s(r.value(3).toString());auto g=object(r.value(4).toString()),a=object(r.value(5).toString());
     v.geometry.traceCount=g["traceCount"].toInteger(-1);v.geometry.inlineMin=g["inlineMin"].toInt();v.geometry.inlineMax=g["inlineMax"].toInt();v.geometry.crosslineMin=g["crosslineMin"].toInt();v.geometry.crosslineMax=g["crosslineMax"].toInt();v.geometry.coordinateSystem=s(g["crs"].toString());v.geometry.coordinateUnit=s(g["unit"].toString());
-    v.sampling.sampleCount=a["sampleCount"].toInt();v.sampling.firstTime=jnumber(a["firstTime"]);v.sampling.sampleInterval=jnumber(a["sampleInterval"]);v.sampling.timeUnit=s(a["timeUnit"].toString());v.sampling.timeType=s(a["timeType"].toString());v.sampling.timeReference=s(a["timeReference"].toString());return true;
+    v.sampling.sampleCount=a["sampleCount"].toInt();v.sampling.firstTime=jnumber(a["firstTime"]);v.sampling.sampleInterval=jnumber(a["sampleInterval"]);v.sampling.timeUnit=s(a["timeUnit"].toString());v.sampling.timeType=s(a["timeType"].toString());v.sampling.timeReference=s(a["timeReference"].toString());return readPlanarCoordinates(*this,v.geometry.coordinateSystem,v.geometry.coordinateUnit,e);
 }
 bool DataService::saveVolume(long long id,const SeismicVolume& v,std::string& e){
     SeismicVolume old;if(!readVolume(id,old,e))return false;if(v.volumeName.empty()){e="地震体名称不能为空";return false;}if(!v.traces.empty()){e="此接口只保存元信息；地震振幅保持外部存储";return false;}
@@ -55,7 +73,7 @@ bool DataService::saveVolume(long long id,const SeismicVolume& v,std::string& e)
 bool DataService::readHorizon(long long id,long long offset,int limit,SeismicHorizon& h,std::string& e)const{
     h={};if(offset<0||limit<1||limit>100000){e="层位分页范围无效";return false;}QSqlQuery r;if(!impl_->store.exec("SELECT h.name,h.volume_id,h.crs,h.unit,h.time_unit,h.time_type,h.time_reference,s.stored_path FROM horizons h LEFT JOIN sources s ON s.id=h.source_id WHERE h.id=?",{id},e,&r))return false;if(!r.next()){e="地震层位不存在";return false;}
     h.horizonName=s(r.value(0).toString());h.parentVolumeId=r.value(1).toInt();h.coordinateSystem=s(r.value(2).toString());h.coordinateUnit=s(r.value(3).toString());h.timeUnit=s(r.value(4).toString());h.timeType=s(r.value(5).toString());h.timeReference=s(r.value(6).toString());h.sourceFile=s(impl_->store.absolutePath(r.value(7).toString()));
-    if(!impl_->store.exec("SELECT inline_no,crossline_no,x,y,z FROM horizon_points WHERE horizon_id=? ORDER BY seq,id LIMIT ? OFFSET ?",{id,limit,offset},e,&r))return false;while(r.next())h.points.push_back({r.value(0).toInt(),r.value(1).toInt(),value(r.value(2)),value(r.value(3)),value(r.value(4))});return true;
+    if(!impl_->store.exec("SELECT inline_no,crossline_no,x,y,z FROM horizon_points WHERE horizon_id=? ORDER BY seq,id LIMIT ? OFFSET ?",{id,limit,offset},e,&r))return false;while(r.next())h.points.push_back({r.value(0).toInt(),r.value(1).toInt(),value(r.value(2)),value(r.value(3)),value(r.value(4))});return readPlanarCoordinates(*this,h.coordinateSystem,h.coordinateUnit,e);
 }
 bool DataService::saveHorizonInfo(long long id,const SeismicHorizon& h,std::string& e){
     if(h.horizonName.empty()){e="层位名称不能为空";return false;}SeismicHorizon old;if(!readHorizon(id,0,1,old,e))return false;
@@ -89,31 +107,5 @@ bool DataService::readTrajectory(long long id,TrajectorySurvey& t,std::string& e
 bool DataService::assignTimeDepthWell(long long id,long long wellId,std::string& e){
     TimeDepthTable table;if(!readTimeDepth(id,table,e))return false;if(wellId<0){e="井编号无效";return false;}if(wellId){WellInfo w;if(!readWellInfo(wellId,w,e))return false;}
     auto& st=impl_->store;Transaction tx(st,e);if(!tx.active)return false;return st.exec("UPDATE well_objects SET well_id=? WHERE id=? AND kind='time_depth'",{wellId?QVariant(wellId):QVariant(),id},e)&&st.exec("INSERT INTO changes(kind,entity_id,description) VALUES('time_depth',?,?)",{id,QString("人工确认归井：%1，数值与来源不变").arg(wellId)},e)&&tx.commit(e);
-}
-bool DataService::confirmTimeDepthSemantics(long long timeDepthId,const std::string& timeUnit,const std::string& timeType,const std::string& timeReference,bool negateTimes,std::string& e){
-    if(timeUnit!="ms"&&timeUnit!="s"){e="时间单位须确认为 ms 或 s";return false;}
-    if(timeType!="TWT"&&timeType!="OWT"){e="时间类型须确认为 TWT 或 OWT";return false;}
-    if(timeReference.empty()){e="时间基准不能为空（如 MSL/海平面）";return false;}
-    QSqlQuery r;if(!impl_->store.exec("SELECT source_id FROM well_objects WHERE id=? AND kind='time_depth'",{timeDepthId},e,&r))return false;
-    if(!r.next()||r.value(0).isNull()){e="时深关系不存在";return false;}
-    const long long sourceId=r.value(0).toLongLong();
-    QSqlQuery all;if(!impl_->store.exec("SELECT id,payload FROM well_objects WHERE source_id=? AND kind='time_depth'",{sourceId},e,&all))return false;
-    std::vector<std::pair<long long,QString>> updates;
-    while(all.next()){
-        auto o=object(all.value(1).toString());
-        o["timeUnit"]=q(timeUnit);o["timeType"]=q(timeType);o["timeReference"]=q(timeReference);
-        o["timeSign"]=negateTimes?QStringLiteral("negated"):QString();
-        updates.push_back({all.value(0).toLongLong(),json(o)});
-    }
-    if(updates.empty()){e="时深关系不存在";return false;}
-    auto& st=impl_->store;Transaction tx(st,e);if(!tx.active)return false;
-    const QString note=QString("人工确认时深口径：%1/%2/%3，%4；原始点值保留")
-        .arg(q(timeType),q(timeUnit),q(timeReference),
-             negateTimes?QStringLiteral("符号按导出口径取反"):QStringLiteral("符号按原值"));
-    for(const auto& u:updates)if(!st.exec("UPDATE well_objects SET payload=? WHERE id=? AND kind='time_depth'",{u.second,u.first},e))return false;
-    if(!st.exec("INSERT INTO changes(kind,entity_id,description) VALUES('time_depth',?,?)",{timeDepthId,note},e))return false;
-    // 一份导出一份口径：同源的时深口径类复核问题随确认消解（多井同源共享）。
-    if(!st.exec("UPDATE issues SET resolved=1,resolution=? WHERE source_id=? AND resolved=0 AND code IN ('TIME_UNIT_UNKNOWN','TIME_REFERENCE_UNKNOWN','TIME_SIGN_REVIEW')",{note,sourceId},e))return false;
-    return tx.commit(e);
 }
 }

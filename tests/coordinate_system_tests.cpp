@@ -117,7 +117,22 @@ int main(int argc,char** argv){
         check(service.readProjectCrsInfo(info,error)&&info.coordinateSystem=="EPSG:32650"&&info.coordinateUnit=="m"&&info.selectionBasis=="default"&&info.candidates.empty(),"missing EPSG defaults to EPSG:32650");
         std::vector<WellSummary> blankListed;WellInfo blankStored;
         check(service.listWells(blankListed,error)&&blankListed.size()==1&&service.readWellInfo(blankListed[0].id,blankStored,error),error);
-        check(blankStored.coordinateSystem=="EPSG:32650"&&blankStored.coordinateUnit=="m","well without a CRS is stored as EPSG:32650");
+        check(blankStored.coordinateSystem=="EPSG:32650"&&blankStored.coordinateUnit=="m","well without a CRS reads as EPSG:32650");
+        ParsedFile blankSpatial;SeismicHorizon blankHorizon;blankHorizon.horizonName="DEFAULT-H1";
+        blankHorizon.points.push_back({1,1,500000,2400000,1000});blankSpatial.horizons.push_back(blankHorizon);
+        importModel(service,temp,"blank-horizon.txt",blankSpatial,error);
+        std::vector<DataEntry> blankHorizons;check(service.listData("horizons",0,blankHorizons,error)&&blankHorizons.size()==1,error);
+        service.closeProject();check(service.openProjectReadOnly(utf8(blankProject),error),error);
+        check(service.readHorizon(blankHorizons[0].id,0,1,blankHorizon,error),error);
+        check(blankHorizon.coordinateSystem=="EPSG:32650"&&blankHorizon.coordinateUnit=="m"&&blankHorizon.points[0].x==500000&&blankHorizon.points[0].zTime==1000,"readonly horizon shares project coordinates, XYZ unchanged");
+        service.closeProject();
+        {
+            auto db=QSqlDatabase::addDatabase("QSQLITE","crs_raw_default");db.setDatabaseName(QDir(blankProject).filePath("data.sqlite"));
+            db.setConnectOptions("QSQLITE_OPEN_READONLY");check(db.open(),"inspect raw CRS declarations");QSqlQuery sql(db);
+            check(sql.exec("SELECT crs,unit FROM wells")&&sql.next()&&sql.value(0).toString().isEmpty(),"default does not rewrite raw well CRS");
+            check(sql.exec("SELECT crs,unit FROM horizons")&&sql.next()&&sql.value(0).toString().isEmpty(),"default does not rewrite raw horizon CRS");
+        }
+        QSqlDatabase::removeDatabase("crs_raw_default");
         const auto utmProject=temp.filePath("utm-project");
         check(service.createProject(utf8(utmProject),"CRS utm",error),error);
         ParsedFile utm;WellDataset utmWell;utmWell.wellInfo.wellName="UTM-1";utmWell.wellInfo.wellheadX=333868;utmWell.wellInfo.wellheadY=2361747;

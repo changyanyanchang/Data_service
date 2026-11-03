@@ -1,6 +1,7 @@
 #pragma once
 #include "parser.h"
 #include "seismic.h"
+#include "section_horizons.h"
 #include "graph.h"
 #include <utility>
 #include "interpretation.h"
@@ -41,7 +42,7 @@ struct WellHeadRange {
 };
 
 // 工区平面范围 = 全部井口点矩形 ∪ 全部地震体范围矩形。
-// 只有两块都在、且坐标约定已确认并一致时才合并；否则 merged.valid=false 并说明原因，
+// 缺声明的数据先继承工区约定；两块坐标约定一致时合并，否则 merged.valid=false 并说明原因，
 // 绝不把不同坐标系或单位的数值凑进同一个矩形。单一来源存在时按 partial 给出该块矩形。
 // status：complete / partial（只有一块）/ unavailable（两块都没有）/
 //         conventions-unconfirmed（两块都在但约定未确认）/ conventions-mismatch（声明冲突）。
@@ -101,7 +102,8 @@ struct CurveSlice {
 };
 
 // Plot input keeps groups, source IDs and conventions separate. No file reparse,
-// interpolation, implicit CRS inheritance or coordinate transformation is performed.
+// interpolation or coordinate transformation is performed. Missing planar CRS/unit
+// declarations inherit the selected project convention; explicit declarations win.
 struct ProjectCoordinates { std::string coordinateSystem, coordinateUnit; };
 struct ProjectCrsCandidate {
     long long sourceId=0, objectId=0;
@@ -245,6 +247,9 @@ public:
     void closeProject();
     std::string projectPath() const;
     std::string projectName() const;
+    // New projects default to EPSG:32650 / m. Explicit import/manual selections win.
+    // Well, volume, horizon and section reads inherit this convention only when absent.
+    // Raw source coordinates and stored declarations remain unchanged.
     std::string projectCrs() const;
     std::string projectCrsUnit() const;
     bool setProjectCrs(const std::string& epsg, const std::string& unit, std::string& e);
@@ -341,6 +346,13 @@ public:
                                    const std::string& timeType,
                                    const std::string& timeReference, bool negateTimes,
                                    std::string& error);
+    // Atomic source-family confirmation plus an optional seismic volume's shared
+    // datum. Time-depth values stay raw; volume sample coordinates are never rescaled.
+    // An existing OWT volume is rejected rather than reinterpreted as TWT.
+    bool confirmTimeDepthAlignment(const std::vector<long long>& timeDepthIds,
+                                   const std::string& timeUnit, const std::string& timeType,
+                                   const std::string& timeReference, bool negateTimes,
+                                   long long volumeId, std::string& error);
     bool readTrajectory(long long id, TrajectorySurvey& result, std::string& error) const;
     // 每个图道返回照片数组，路径已解析为可访问的完整路径；深度未知时为 Missing。
     bool readCorePhotoTrack(long long id, CorePhotoTrack& result, std::string& error) const;
@@ -348,6 +360,10 @@ public:
     bool readVolume(long long id, SeismicVolume& result, std::string& error) const; // metadata only; traces stays empty
     bool saveVolume(long long id, const SeismicVolume& value, std::string& error); // edits existing registration; never stores amplitudes
     bool readHorizon(long long id, long long offset, int limit, SeismicHorizon& result, std::string& error) const;
+    // Metadata only: major horizons and scheme-defined S1..S4 edges sampled at
+    // the actual displayed trace columns. No SEG-Y amplitudes or well TD required.
+    bool readSectionHorizons(const SectionHorizonQuery& query, SectionHorizonResult& result,
+                             std::string& error, const CancelCheck& cancelled={}) const;
     // Bounding box uses this horizon's original X/Y coordinate units. Unknown CRS remains unknown.
     // Returns actual source points; exceeding maxPoints is an error, never silent downsampling.
     bool readHorizonRegion(long long id, double xMin, double yMin, double xMax, double yMax,
