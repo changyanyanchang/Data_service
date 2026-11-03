@@ -36,7 +36,15 @@ bool DataService::readAttachment(long long id,Attachment& result,std::string& e)
     auto path=o["path"].toString();result.filePath=path.isEmpty()?std::string():s(impl_->store.absolutePath(path));result.attachmentType=s(o["type"].toString());result.targetType=s(o["targetType"].toString());result.targetId=o["targetId"].toInt();return true;
 }
 bool DataService::readIntervalTrackInfo(long long id,IntervalTrack& t,std::string& e)const{
-    t={};QSqlQuery r;if(!impl_->store.exec("SELECT t.name,t.type,t.depth_json,t.sheet,s.stored_path FROM tracks t LEFT JOIN sources s ON s.id=t.source_id WHERE t.id=?",{id},e,&r))return false;if(!r.next()){e="分层道不存在";return false;}t.trackName=s(r.value(0).toString());t.trackType=s(r.value(1).toString());t.depthInfo=readDepth(object(r.value(2).toString()));t.sourceSheet=s(r.value(3).toString());t.sourceFile=s(impl_->store.absolutePath(r.value(4).toString()));return true;
+    t={};QSqlQuery r;if(!impl_->store.exec("SELECT t.name,t.type,t.depth_json,t.sheet,s.stored_path,s.options,s.kind FROM tracks t LEFT JOIN sources s ON s.id=t.source_id WHERE t.id=?",{id},e,&r))return false;if(!r.next()){e="分层道不存在";return false;}t.trackName=s(r.value(0).toString());t.trackType=s(r.value(1).toString());t.depthInfo=readDepth(object(r.value(2).toString()));t.sourceSheet=s(r.value(3).toString());t.sourceFile=s(impl_->store.absolutePath(r.value(4).toString()));
+    // Older comprehensive workbook imports dropped the declaration when MD and
+    // TVD columns were interleaved. The source's explicit host contract remains
+    // authoritative offline; fill only missing components, without rewriting it.
+    if(r.value(6).toString()=="workbook"&&object(r.value(5).toString())["comprehensiveWellMetreDepth"].toBool()){
+        if(t.depthInfo.depthType.empty())t.depthInfo.depthType="MD";
+        if(t.depthInfo.depthUnit.empty())t.depthInfo.depthUnit="m";
+    }
+    return true;
 }
 bool DataService::readVolume(long long id,SeismicVolume& v,std::string& e)const{
     v={};QSqlQuery r;if(!impl_->store.exec("SELECT name,path,format,amplitude_unit,geometry,sampling FROM volumes WHERE id=?",{id},e,&r))return false;if(!r.next()){e="地震体不存在";return false;}
