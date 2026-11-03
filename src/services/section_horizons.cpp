@@ -38,6 +38,10 @@ bool DataService::readSectionHorizons(const SectionHorizonQuery& query,SectionHo
     while(rows.next()){DataEntry entry;entry.id=rows.value(0).toLongLong();entry.name=s(rows.value(1).toString());entries.push_back(std::move(entry));}
     rows.finish();
     SectionHorizonResult next;std::map<long long,size_t> byResource;
+    const auto& first=query.columns.front();
+    const bool inlineLine=std::all_of(query.columns.begin(),query.columns.end(),[&](const auto& c){return c.inlineNumber==first.inlineNumber;});
+    const bool crosslineLine=std::all_of(query.columns.begin(),query.columns.end(),[&](const auto& c){return c.crosslineNumber==first.crosslineNumber;});
+    const int direction=inlineLine?1:crosslineLine?-1:0;
     for(const auto& entry:entries){
         if(stopped())return false;
         if((next.curves.size()+1)*query.columns.size()>8000000){error="层位叠加超出点数预算";return false;}
@@ -50,7 +54,7 @@ bool DataService::readSectionHorizons(const SectionHorizonQuery& query,SectionHo
         const auto type=h.timeType.empty()?volumeType:h.timeType;
         if((unit!="ms"&&unit!="s")||(type!="TWT"&&type!="OWT")){skip("没有可用时间单位或单双程约定");continue;}
         const double scale=(unit=="s"?1000.:1.)*(type=="OWT"?2.:1.);
-        GridSampler sampler(store,entry.id,query.interpolationRadius);if(!sampler.prepare(error))return false;
+        GridSampler sampler(store,entry.id,query.interpolationRadius,true,direction);if(!sampler.prepare(error))return false;
         SectionHorizonCurve curve;curve.id="horizon:"+std::to_string(entry.id);curve.name=h.horizonName;curve.horizonId=entry.id;
         curve.timesMs.reserve(query.columns.size());
         for(const auto& column:query.columns){
