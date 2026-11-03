@@ -128,13 +128,24 @@ std::string tileKey(const std::string& source,const Job& job,int first,int count
     std::ostringstream out;out<<source<<"|slice-v1|"<<first<<'|'<<count<<'|'<<strict<<'|'<<residual<<"|IL:";
     for(int n:job.il)out<<n<<',';out<<"|XL:";for(int n:job.xl)out<<n<<',';return out.str();
 }
+class ReaderPool {
+public:
+    struct Slot {Reader reader;std::mutex mutex;bool opened=false;};
+    explicit ReaderPool(int workers){for(int n=0;n<workers;++n)slots_.push_back(std::make_unique<Slot>());}
+    Slot& next(){return *slots_[next_++%slots_.size()];}
+private:
+    std::vector<std::unique_ptr<Slot>> slots_;
+    std::atomic_size_t next_=0;
+};
 struct WorkResult {bool ok=false;std::string error;std::shared_ptr<const BandTile> tile;SeismicReadStatistics stats;};
 WorkResult loadTile(const std::string& path,const Job& job,int first,int count,const TimeSliceReadOptions& options,
-                    bool strict,double residual,const std::shared_ptr<std::atomic_bool>& abort){
+                    bool strict,double residual,const std::shared_ptr<std::atomic_bool>& abort,
+                    const std::shared_ptr<ReaderPool>& readers){
     WorkResult result;
     try{
         const Cancel cancel=[abort]{return abort->load();};
-        Reader worker;if(!worker.open(path,result.error,cancel))return result;
+        auto& slot=readers->next();std::lock_guard lock(slot.mutex);Reader& worker=slot.reader;
+        if(!slot.opened){if(!worker.open(path,result.error,cancel))return result;slot.opened=true;}
         const size_t cells=size_t(job.rows)*job.columns;
         auto tile=std::make_shared<BandTile>();tile->amplitudes.assign(cells*count,float(Missing));tile->x.resize(cells,Missing);tile->y.resize(cells,Missing);
         std::vector<long long> ordinals;std::vector<size_t> positions;ordinals.reserve(cells);positions.reserve(cells);
@@ -202,6 +213,7 @@ bool readSliceTiled(Reader& reader,double time,const TimeSliceReadOptions& optio
     const int rowBlocks=(rows+layout.rows-1)/layout.rows,columnBlocks=(columns+layout.columns-1)/layout.columns;
     stats.totalTiles=rowBlocks*columnBlocks;
     auto abort=std::make_shared<std::atomic_bool>(false);
+    auto readers=std::make_shared<ReaderPool>(options.workerCount);
     struct Pending {Job job;std::future<WorkResult> future;};
     std::vector<Pending> pending;pending.reserve(options.workerCount);
     // Declared after futures: cancels workers before future destructors join on any exit.
@@ -232,7 +244,7 @@ bool readSliceTiled(Reader& reader,double time,const TimeSliceReadOptions& optio
             ++next;job.key=tileKey(sourceIdentity,job,bandFirst,bandCount,strict,residual);
             if(caching){auto cached=cache().get(job.key);if(cached){++stats.cacheHits;publish(job,*cached,true);continue;}}
             ++stats.cacheMisses;
-            auto future=std::async(std::launch::async,[path=facts.sourceFile,job,bandFirst,bandCount,options,strict,residual,abort]{return loadTile(path,job,bandFirst,bandCount,options,strict,residual,abort);});
+            auto future=std::async(std::launch::async,[path=facts.sourceFile,job,bandFirst,bandCount,options,strict,residual,abort,readers]{return loadTile(path,job,bandFirst,bandCount,options,strict,residual,abort,readers);});
             pending.push_back({std::move(job),std::move(future)});stats.workerCount=std::max(stats.workerCount,static_cast<int>(pending.size()));
         }
         bool completed=false;
