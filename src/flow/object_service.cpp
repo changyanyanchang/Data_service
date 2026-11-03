@@ -11,9 +11,18 @@ using namespace detail;
 static double jnumber(const QJsonValue& v){return v.isDouble()?v.toDouble():Missing;}
 bool DataService::readLogSet(long long id,bool processed,LogSet& result,std::string& e)const{
     result={};QSqlQuery r;
-    if(!impl_->store.exec("SELECT l.name,l.depth_json,l.depths,l.tvd,l.tvdss,l.step,l.sheet,s.stored_path FROM log_sets l LEFT JOIN sources s ON s.id=l.source_id WHERE l.id=?",{id},e,&r))return false;
+    if(!impl_->store.exec("SELECT l.name,l.depth_json,l.depths,l.tvd,l.tvdss,l.step,l.sheet,s.stored_path,s.options,s.kind,s.original_path FROM log_sets l LEFT JOIN sources s ON s.id=l.source_id WHERE l.id=?",{id},e,&r))return false;
     if(!r.next()){e="曲线组不存在";return false;}
     result.logSetName=s(r.value(0).toString());result.depthInfo=readDepth(object(r.value(1).toString()));
+    if(r.value(9).toString()=="workbook"&&object(r.value(8).toString())["comprehensiveWellMetreDepth"].toBool()){
+        if(result.depthInfo.depthType.empty())result.depthInfo.depthType="MD";
+        if(result.depthInfo.depthUnit.empty())result.depthInfo.depthUnit="m";
+    }else if(result.depthInfo.depthType.empty()&&r.value(9).toString()=="logs"&&
+             QFileInfo(r.value(10).toString()).suffix().compare("las",Qt::CaseInsensitive)==0){
+        // Old LAS imports lost MD on the accepted DEPT/DEPTH index. The format
+        // contract is available offline; this does not supply a missing unit.
+        result.depthInfo.depthType="MD";
+    }
     if(!unpack(r.value(2).toByteArray(),result.samplingAxis.depthValues,e)||!unpack(r.value(3).toByteArray(),result.samplingAxis.tvdValues,e)||!unpack(r.value(4).toByteArray(),result.samplingAxis.tvdssValues,e))return false;
     result.samplingAxis.sampleStep=value(r.value(5));result.sourceSheet=s(r.value(6).toString());result.sourceFile=s(impl_->store.absolutePath(r.value(7).toString()));
     if(!impl_->store.exec("SELECT name,unit,description,raw_values,processed_values FROM curves WHERE set_id=? ORDER BY id",{id},e,&r))return false;

@@ -49,6 +49,7 @@ int main(int argc,char** argv) {
     {
       auto fixtureDb=QSqlDatabase::addDatabase("QSQLITE","legacy-confirmed-plot");fixtureDb.setDatabaseName(QString::fromStdString(root)+"/data.sqlite");check(fixtureDb.open(),"fixture metadata connection");
       QSqlQuery edit(fixtureDb);check(edit.exec("UPDATE sources SET kind='workbook',options='{\"comprehensiveWellMetreDepth\":true}'"),"simulate older confirmed workbook metadata");
+      check(edit.exec("UPDATE log_sets SET depth_json=CASE WHEN source_id=(SELECT MIN(id) FROM sources) THEN '{}' ELSE '{\"type\":\"TVD\",\"unit\":\"ft\"}' END"),"simulate missing and explicit log conventions");
       check(edit.exec("SELECT depth_json FROM tracks ORDER BY id LIMIT 1")&&edit.next()&&!edit.value(0).toString().contains("MD"),"stored track depth declaration remains untouched");
     }
     QSqlDatabase::removeDatabase("legacy-confirmed-plot");
@@ -57,6 +58,8 @@ int main(int argc,char** argv) {
     check(data.logs.size()==2&&data.intervals.size()==2&&data.markers.size()==1&&data.photos.size()==1,"all sources without raw files");
     check(data.intervals[0].value.depthInfo.depthType=="MD"&&data.intervals[0].value.depthInfo.depthUnit=="m","offline confirmed workbook fills missing track conventions");
     check(data.intervals[1].value.depthInfo.depthType=="TVD"&&data.intervals[1].value.depthInfo.depthUnit=="ft","explicit track convention wins over source default");
+    check(data.logs[0].value.depthInfo.depthType=="MD"&&data.logs[0].value.depthInfo.depthUnit=="m","offline confirmed workbook fills missing log conventions");
+    check(data.logs[1].value.depthInfo.depthType=="TVD"&&data.logs[1].value.depthInfo.depthUnit=="ft","explicit log convention wins over source default");
     check(data.photos.front().value.photos.front().topDepth==100,"photo reference and anchor");
     check(data.logs.front().value.logCurves.front().sampleValues.front()==99,"processed database edit");
     check(data.well.wellheadX==0&&data.well.coordinateSystem=="EPSG:32649"&&data.projectCoordinates.coordinateSystem=="EPSG:4326","distinct stored CRS and valid zero");
@@ -79,6 +82,18 @@ int main(int argc,char** argv) {
     }),error);
     check(data.well.wellheadY==100&&data.logs.front().value.logCurves.front().sampleValues.front()==99,"coherent WAL snapshot during concurrent update");
     check(service.readWellPlotData(wells.front(),{},data,error)&&data.well.wellheadY==250&&data.logs.front().value.logCurves.front().sampleValues.front()==88,"subsequent read observes committed update");
+    DataService lasService;const auto lasRoot=temp.filePath("las-project").toStdString();check(lasService.createProject(lasRoot,"las",error),error);
+    const auto lasPath=temp.filePath("HZ1-1-1.las");{QFile las(lasPath);check(las.open(QIODevice::WriteOnly),"LAS fixture");las.write("~Well\nWELL. HZ1-1-1 : well\n~Curve\nDEPT.M : depth\nGR.API : gamma\n~ASCII\n100 20\n101 80\n");}
+    auto las=parseFile(lasPath.toStdString());check(las.wells.size()==1,"LAS parse");
+    check(las.wells.front().wellbore.logSets.front().depthInfo.depthType=="MD","LAS DEPT parser keeps measured-depth index");
+    las.wells.front().wellbore.logSets.front().depthInfo.depthType.clear(); // legacy import, original values remain.
+    QFile lasOriginal(lasPath);check(lasOriginal.open(QIODevice::ReadOnly),"LAS hash input");
+    const auto lasSha=QCryptographicHash::hash(lasOriginal.readAll(),QCryptographicHash::Sha256).toHex().toStdString();lasOriginal.close();
+    long long lasSource=0;check(lasService.importPreparedFile(lasPath.toStdString(),lasPath.toStdString(),lasPath.toStdString(),lasSha,las,lasSource,error),error);
+    std::vector<DataEntry> lasCurves;check(lasService.listData("curves",0,lasCurves,error)&&lasCurves.size()==1,"LAS group identity");
+    check(QFile::remove(lasPath),"remove LAS original");lasService.closeProject();check(lasService.openProjectReadOnly(lasRoot,error),error);
+    LogSet legacy;check(lasService.readLogSet(lasCurves.front().parentId,true,legacy,error),error);
+    check(legacy.depthInfo.depthType=="MD"&&legacy.depthInfo.depthUnit=="M"&&legacy.samplingAxis.depthValues.front()==100,"old LAS read is MD, preserves declared unit and raw axis offline");
     std::cout<<"well plot contract passed\n";return 0;
   } catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }
