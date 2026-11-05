@@ -23,6 +23,29 @@ static void checkPreparedSegyRelocation(const QTemporaryDir& temp) {
   check(service.createProject(u(temp.filePath("segy-project")),"prepared SEG-Y",error),error);
   check(service.importPreparedFile(u(source),u(source),u(source),hash,model,sourceId,error),error);
   check(service.verifySource(sourceId,error),error);
+  // Preparation is read-only; publication rejects stale files and other projects.
+  DataService reader;
+  check(reader.openProjectReadOnly(u(temp.filePath("segy-project")),error),error);
+  SourceIndexEntry entry;
+  check(reader.readSourceIndexEntry(sourceId,entry,error)&&entry.id==sourceId,"indexed source lookup");
+  check(!reader.readSourceIndexEntry(-1,entry,error),"missing source rejected");
+  const auto candidate=temp.filePath("prepared-candidate.bin");
+  check(QFile::copy(source,candidate),"copy prepared candidate");
+  std::shared_ptr<const PreparedSourceRelocation> prepared;
+  check(reader.prepareSourceRelocation(sourceId,u(candidate),prepared,error),error);
+  check(prepared->verifiedBytes()==bytes.size(),"SHA source reads exactly its bytes");
+  check(!reader.commitSourceRelocation(*prepared,error),"read-only publication rejected");
+  DataService other;check(other.createProject(u(temp.filePath("other-project")),"other",error),error);
+  check(!other.commitSourceRelocation(*prepared,error),"cross-project plan rejected");
+  QFile changedCandidate(candidate);check(changedCandidate.open(QIODevice::Append),"change candidate");
+  changedCandidate.write("changed");changedCandidate.close();
+  check(!service.commitSourceRelocation(*prepared,error),"candidate drift rejected before publication");
+  check(!reader.prepareSourceRelocation(sourceId,u(candidate),prepared,error,[]{return true;})&&!prepared,"cancel clears prepared output");
+  check(QFile::remove(candidate)&&QFile::copy(source,candidate),"restore private candidate");
+  check(reader.prepareSourceRelocation(sourceId,u(candidate),prepared,error),error);
+  check(service.commitSourceRelocation(*prepared,error),error);
+  check(!service.commitSourceRelocation(*prepared,error),"source-row CAS rejects stale plan");
+  check(service.verifySource(sourceId,error),error);
   std::vector<DataEntry> volumes;
   check(service.listData("volumes",0,volumes,error)&&volumes.size()==1,"prepared volume registered");
   const auto replacement=temp.filePath("relocated.sgy");
@@ -57,6 +80,7 @@ int main(int argc,char** argv) {
     logs.logCurves.push_back(curve); well.wellbore.logSets.push_back(logs); model.wells.push_back(well);
     const auto project=temp.filePath("model"); DataService service; std::string error; long long id=0;
     check(service.createProject(u(project),"prepared",error),error);
+    ProjectCrsInfo initialCrs;check(service.readProjectCrsInfo(initialCrs,error),error);
     check(!service.importPreparedFile(u(source),u(source),"../source.las",std::string(64,'0'),model,id,error),"wrong hash rejected");
     check(!service.importPreparedFile(u(source),u(source),"../source.las",hash,model,id,error,[]{return true;}),"cancel rejected");
     auto broken=model; broken.wells[0].wellbore.logSets[0].logCurves[0].sampleValues.pop_back();
@@ -88,7 +112,7 @@ int main(int argc,char** argv) {
     std::vector<IssueEntry> issues;
     check(service.listIssues(false,issues,error)&&issues.empty(),"blocking conflict rolls back issues with source");
     ProjectCrsInfo crs;
-    check(service.readProjectCrsInfo(crs,error)&&crs.candidates.empty()&&crs.coordinateSystem.empty()&&crs.selectionBasis.empty(),"blocking conflict rolls back coordinate candidates and automatic project CRS");
+    check(service.readProjectCrsInfo(crs,error)&&crs.candidates.empty()&&crs.coordinateSystem==initialCrs.coordinateSystem&&crs.selectionBasis==initialCrs.selectionBasis,"blocking conflict preserves preexisting project CRS and rolls back coordinate candidates");
     check(service.readCurveSlice(curveId,Missing,Missing,true,slice,error)&&slice.values[0]==-999,"original values survive rejected batch");
 
     // Issues supplied by the host follow the same rollback rule as storage conflicts.
@@ -116,7 +140,7 @@ int main(int argc,char** argv) {
     const auto reopenedReview=std::find_if(sources.begin(),sources.end(),[reviewId](const SourceEntry& entry){return entry.id==reviewId;});
     check(reopenedReview!=sources.end()&&reopenedReview->status=="review","review status survives reopen");
     check(service.listWells(wells,error)&&wells.size()==2,"rolled-back well stays absent after reopen");
-    check(service.readProjectCrsInfo(crs,error)&&crs.candidates.empty()&&crs.coordinateSystem.empty(),"rolled-back coordinate metadata stays absent after reopen");
+    check(service.readProjectCrsInfo(crs,error)&&crs.candidates.empty()&&crs.coordinateSystem==initialCrs.coordinateSystem,"rolled-back coordinate candidates stay absent after reopen");
     check(service.verifySource(id,error),error);
     check(service.readCurveSlice(curveId,Missing,Missing,true,slice,error),error);
     check(!service.importPreparedFile(u(source),u(source),"../source.las",hash,model,id,error),"readonly rejected");

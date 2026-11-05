@@ -59,8 +59,8 @@ static QString optionsJson(const ParseOptions& o){
     if(o.comprehensiveWellMetreDepth)config["comprehensiveWellMetreDepth"]=true;
     return json(config);
 }
-static bool digestFile(const QString& path,QString& digest,const CancelCheck& cancelled,std::string& e,long long* bytesRead=nullptr){
-    bool largeSegy=QStringList{"sgy","segy"}.contains(QFileInfo(path).suffix().toLower());
+static bool digestFile(const QString& path,QString& digest,const CancelCheck& cancelled,std::string& e,long long* bytesRead=nullptr,bool forceQuick=false){
+    bool largeSegy=forceQuick||QStringList{"sgy","segy"}.contains(QFileInfo(path).suffix().toLower());
     if(largeSegy){
         if(cancelled&&cancelled()){e="已取消";return false;}
         QFile f(path);if(!f.open(QIODevice::ReadOnly)){e=s(f.errorString());return false;}
@@ -314,28 +314,42 @@ bool DataService::reimportSource(long long id,const ParseOptions& mapping,Import
     auto path=impl_->store.absolutePath(r.value(1).toString());ImportOptions options;options.parsing=mapping;options.forceNewBatch=true;return doImport(impl_->store,path,r.value(0).toString(),options,report,e,cancelled,id);
 }
 bool DataService::relocateSource(long long id,const std::string& path,std::string& e){
-    e.clear();
-    QSqlQuery r;auto& st=impl_->store;if(!st.exec("SELECT hash,stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源不存在";return false;}
-    const auto expected=r.value(0).toString();
-    auto replacement=QFileInfo(q(path)).absoluteFilePath();QString digest;
-    // Prepared sources use full SHA-256 even for SEG-Y. Match the stored identity
-    // scheme, just as verifySource does, instead of guessing from the extension.
-    if(expected.startsWith("quick:")?!digestFile(replacement,digest,{},e):!fullFileSha256(replacement,digest,e))return false;
-    if(digest!=expected){e="新文件与记录身份不符，不能静默替换；请作为新资料导入。";if(expected.startsWith("quick:"))e+="地震体快速身份包含文件大小、修改时间和文件头。";return false;}
-    const QString previous=r.value(1).toString();r.finish();
-    if(!st.begin(e))return false;
-    QSqlQuery objects;if(!st.exec("SELECT id,kind,payload FROM well_objects WHERE source_id=? AND kind IN ('core_photos','attachments')",{id},e,&objects)){st.rollback();return false;}
-    std::vector<std::pair<qlonglong,QString>> updates;
-    while(objects.next()){
-        auto doc=QJsonDocument::fromJson(objects.value(2).toString().toUtf8());
-        auto replacePath=[&](QJsonObject o){const QString p=o["path"].toString();if(!p.isEmpty()&&(p==previous||st.absolutePath(p)==st.absolutePath(previous)))o["path"]=replacement;return o;};
-        if(doc.isArray()){QJsonArray images;for(auto v:doc.array())images.append(replacePath(v.toObject()));updates.push_back({objects.value(0).toLongLong(),json(images)});}
-        else updates.push_back({objects.value(0).toLongLong(),json(replacePath(doc.object()))});
-    }objects.finish();
-    for(const auto& [objectId,payload]:updates)if(!st.exec("UPDATE well_objects SET payload=? WHERE id=?",{payload,objectId},e)){st.rollback();return false;}
-    bool ok=st.exec("UPDATE sources SET stored_path=? WHERE id=?",{replacement,id},e)&&st.exec("UPDATE volumes SET path=? WHERE source_id=?",{replacement,id},e)&&st.exec("UPDATE maps SET image_path=CASE WHEN image_path=? THEN ? ELSE image_path END,source_file=CASE WHEN source_file=? THEN ? ELSE source_file END WHERE source_id=?",{previous,replacement,previous,replacement,id},e)&&st.exec("INSERT INTO changes(kind,entity_id,description) VALUES('source',?,'核验文件身份后重新定位来源')",{id},e)&&st.commit(e);if(!ok)st.rollback();return ok;
+    std::shared_ptr<const PreparedSourceRelocation> prepared;
+    return prepareSourceRelocation(id,path,prepared,e)&&commitSourceRelocation(*prepared,e);
+}
+bool DataService::prepareSourceRelocation(long long id,const std::string& path,
+    std::shared_ptr<const PreparedSourceRelocation>& result,std::string& e,const CancelCheck& cancelled)const{
+    result.reset();e.clear();SourceIndexEntry source;
+    if(!readSourceIndexEntry(id,source,e))return false;
+    if(!source.active){e="来源已停用";return false;}
+    if(cancelled&&cancelled()){e="已取消";return false;}
+    QFileInfo before(q(path));
+    if(!before.isFile()){e="新来源不存在或不是普通文件";return false;}
+    QString digest;long long verifiedBytes=0;
+    if(q(source.sha256).startsWith("quick:")){
+        QFile file(before.absoluteFilePath());if(!file.open(QIODevice::ReadOnly)){e=s(file.errorString());return false;}
+        const auto head=file.read(65536);verifiedBytes=head.size();
+        if(file.error()!=QFile::NoError){e=s(file.errorString());return false;}
+        QCryptographicHash hash(QCryptographicHash::Sha256);hash.addData(head);
+        hash.addData(QByteArray::number(file.size()));hash.addData(QByteArray::number(before.lastModified().toMSecsSinceEpoch()));
+        digest="quick:"+QString::fromLatin1(hash.result().toHex());
+    }else if(!fullFileSha256(before.absoluteFilePath(),digest,e,cancelled,&verifiedBytes))return false;
+    if(cancelled&&cancelled()){e="已取消";return false;}
+    QFileInfo after(before.absoluteFilePath());
+    if(before.size()!=after.size()||before.lastModified()!=after.lastModified()||
+       before.metadataChangeTime()!=after.metadataChangeTime()||before.birthTime()!=after.birthTime()){
+        e="核验期间新来源发生变化";return false;
+    }
+    if(digest!=q(source.sha256)){e="新文件与记录身份不符，不能静默替换；请作为新资料导入。";return false;}
+    auto prepared=std::shared_ptr<PreparedSourceRelocation>(new PreparedSourceRelocation);
+    prepared->sourceId_=id;prepared->root_=s(QDir::cleanPath(impl_->store.root));
+    prepared->stored_=source.storedPath;prepared->original_=s(impl_->store.absolutePath(q(source.storedPath)));
+    prepared->candidate_=s(before.absoluteFilePath());prepared->fingerprint_=source.sha256;
+    prepared->size_=before.size();prepared->mtime_=before.lastModified().toMSecsSinceEpoch();
+    prepared->change_=before.metadataChangeTime().toMSecsSinceEpoch();prepared->birth_=before.birthTime().toMSecsSinceEpoch();
+    prepared->verifiedBytes_=verifiedBytes;result=std::move(prepared);return true;
 }
 bool DataService::verifySource(long long id,std::string& e)const{
-    QSqlQuery r;const auto& st=impl_->store;if(!st.exec("SELECT hash,stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源不存在";return false;}QString digest;const auto expected=r.value(0).toString();const auto path=st.absolutePath(r.value(1).toString());if(expected.startsWith("quick:")?!digestFile(path,digest,{},e):!fullFileSha256(path,digest,e))return false;if(digest!=expected){e="来源文件已改变，请核对后重新导入，不能继续使用旧对象读取";return false;}return true;
+    QSqlQuery r;const auto& st=impl_->store;if(!st.exec("SELECT hash,stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源不存在";return false;}QString digest;const auto expected=r.value(0).toString();const auto path=st.absolutePath(r.value(1).toString());if(expected.startsWith("quick:")?!digestFile(path,digest,{},e,nullptr,true):!fullFileSha256(path,digest,e))return false;if(digest!=expected){e="来源文件已改变，请核对后重新导入，不能继续使用旧对象读取";return false;}return true;
 }
 }

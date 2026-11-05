@@ -6,6 +6,7 @@
 #include <utility>
 #include "interpretation.h"
 #include "stratigraphic_framework.h"
+#include "source_relocation.h"
 #include <memory>
 #include <cstdint>
 
@@ -314,6 +315,8 @@ public:
     bool deleteData(const std::string& kind, long long id, std::string& error); // DB records only; external files never deleted
     bool listSources(std::vector<SourceEntry>& result, std::string& error) const;
     bool listSourceIndexEntries(std::vector<SourceIndexEntry>& result, std::string& error) const;
+    // Indexed lookup: no enumeration of every source in a large work area.
+    bool readSourceIndexEntry(long long sourceId, SourceIndexEntry& result, std::string& error) const;
     // Relations are directed from sourceId to targetSourceId. Repeating the same
     // relation updates its note and returns the existing stable relation ID.
     bool relateSources(long long sourceId, long long targetSourceId, const std::string& relation,
@@ -331,6 +334,12 @@ public:
     bool verifySource(long long sourceId, std::string& error) const; // SEG-Y uses size/mtime/header fingerprint; other sources SHA-256
     bool readDocument(long long sourceId, std::string& text, std::string& error) const;
     bool relocateSource(long long sourceId, const std::string& path, std::string& error);
+    bool prepareSourceRelocation(long long sourceId, const std::string& path,
+        std::shared_ptr<const PreparedSourceRelocation>& result, std::string& error,
+        const CancelCheck& cancelled={}) const;
+    // Owner-thread metadata transaction only. The prepare token is project-bound;
+    // a changed source row or candidate stamp rejects publication.
+    bool commitSourceRelocation(const PreparedSourceRelocation& prepared, std::string& error);
     bool readSampleTable(long long tableId, SampleTable& result, std::string& error) const;
     // 返回完整时深点数组及深度/时间约定；保留负时间和未知单位，不自动换算
     //（已确认 negated 符号约定的来源按确认口径交付，见 confirmTimeDepthSemantics）。

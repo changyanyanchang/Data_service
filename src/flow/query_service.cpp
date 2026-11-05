@@ -133,6 +133,14 @@ bool DataService::listSourceIndexEntries(std::vector<SourceIndexEntry>& out,std:
         row.bytes=r.value(6).toLongLong();row.sha256=s(r.value(7).toString());row.active=r.value(8).toBool();out.push_back(std::move(row));
     }return true;
 }
+bool DataService::readSourceIndexEntry(long long id,SourceIndexEntry& out,std::string& e)const{
+    out={};e.clear();QSqlQuery r;
+    if(!impl_->store.exec("SELECT id,original_path,stored_path,kind,status,message,bytes,hash,active FROM sources WHERE id=?",{id},e,&r))return false;
+    if(!r.next()){e="来源记录不存在";return false;}
+    out.id=r.value(0).toLongLong();out.path=s(r.value(1).toString());out.storedPath=s(r.value(2).toString());
+    out.kind=s(r.value(3).toString());out.status=s(r.value(4).toString());out.message=s(r.value(5).toString());
+    out.bytes=r.value(6).toLongLong();out.sha256=s(r.value(7).toString());out.active=r.value(8).toBool();return true;
+}
 bool DataService::listIssues(bool unresolved,std::vector<IssueEntry>& out,std::string& e)const{out.clear();QSqlQuery r;if(!impl_->store.exec("SELECT id,source_id,code,message,original_text,sheet,resolution,row_num,blocking,resolved FROM issues WHERE (?=0 OR resolved=0) ORDER BY blocking DESC,id",{unresolved},e,&r))return false;while(r.next())out.push_back({r.value(0).toLongLong(),r.value(1).toLongLong(),s(r.value(2).toString()),s(r.value(3).toString()),s(r.value(4).toString()),s(r.value(5).toString()),s(r.value(6).toString()),r.value(7).toInt(),r.value(8).toBool(),r.value(9).toBool()});return true;}
 bool DataService::sourcePath(long long id,std::string& path,std::string& e)const{QSqlQuery r;if(!impl_->store.exec("SELECT stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源记录不存在";return false;}path=s(impl_->store.absolutePath(r.value(0).toString()));return true;}
 bool DataService::readDocument(long long id,std::string& text,std::string& e)const{QSqlQuery r;if(!impl_->store.exec("SELECT document FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源记录不存在";return false;}text=s(r.value(0).toString());return true;}
