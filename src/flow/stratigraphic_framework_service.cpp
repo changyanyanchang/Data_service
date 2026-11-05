@@ -12,6 +12,21 @@ namespace ix = detail::interpretation;
 namespace fw = framework;
 namespace {
 constexpr int FrameworkSchema = 1;
+// A scheme can be committed alone or inside the builder's publication
+// transaction. Releasing an inner savepoint must not commit the outer write.
+class SchemeSavepoint {
+    ProjectStore& store;
+    QString name;
+public:
+    bool active;
+    SchemeSavepoint(ProjectStore& value,std::string& error)
+        :store(value),name(QStringLiteral("\"paleo_strat_%1\"").arg(ix::newId())),
+         active(store.exec("SAVEPOINT "+name,{},error)) {}
+    ~SchemeSavepoint(){if(active){std::string ignored;store.exec("ROLLBACK TO "+name,{},ignored);store.exec("RELEASE "+name,{},ignored);}}
+    bool commit(std::string& error){if(!active || !store.exec("RELEASE "+name,{},error))return false;active=false;return true;}
+    SchemeSavepoint(const SchemeSavepoint&)=delete;
+    SchemeSavepoint& operator=(const SchemeSavepoint&)=delete;
+};
 QJsonValue num(double v) { return std::isfinite(v) ? QJsonValue(v) : QJsonValue(QJsonValue::Null); }
 double real(const QJsonValue& v) { return v.isDouble() ? v.toDouble() : Missing; }
 
@@ -176,7 +191,7 @@ bool commitInternal(ProjectStore& st, StratigraphicScheme scheme, const std::str
     fw::deriveUnits(scheme);
     issues = fw::validate(scheme);
     if (fw::hasErrors(issues)) { error = "层段方案校验失败：" + issues.front().message; for (auto& i : issues) if (i.severity == "error") { error = "层段方案校验失败：" + i.message; break; } return false; }
-    Transaction tx(st, error);
+    SchemeSavepoint tx(st, error);
     if (!tx.active || !ensureSchema(st, error)) return false;
     std::string project;
     if (!ix::projectId(st, project, error)) return false;

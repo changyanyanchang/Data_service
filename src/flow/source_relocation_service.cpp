@@ -16,6 +16,11 @@ bool DataService::commitSourceRelocation(const PreparedSourceRelocation& prepare
         error="新来源在核验后发生变化，请重新核验";return false;
     }
     Transaction transaction(store,error);if(!transaction.active)return false;
+    QSqlQuery schema;
+    if(!store.exec("SELECT value FROM ds_meta WHERE key='schema_version'",{},error,&schema)||!schema.next()||schema.value(0).toString()!="1"){
+        error="工区格式不受支持";return false;
+    }
+    schema.finish();
     SourceIndexEntry current;if(!readSourceIndexEntry(prepared.sourceId_,current,error))return false;
     if(!current.active||current.sha256!=prepared.fingerprint_||current.storedPath!=prepared.stored_){
         error="来源登记在核验后发生变化，请重新准备";return false;

@@ -4,12 +4,23 @@
 #include <QTemporaryDir>
 #include <QFile>
 #include <QDir>
+#include <QSqlDatabase>
+#include <QSqlQuery>
+#include <QUuid>
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
 using namespace paleo::data;
 static void check(bool ok,const std::string& why) { if(!ok)throw std::runtime_error(why); }
 static std::string u(const QString& value) { return value.toUtf8().toStdString(); }
+static void executeAt(const QString& project,const QString& sql) {
+  const auto name="relocation-contract-"+QUuid::createUuid().toString(QUuid::WithoutBraces);
+  {
+    auto db=QSqlDatabase::addDatabase("QSQLITE",name);db.setDatabaseName(project+"/data.sqlite");check(db.open(),"open test metadata");
+    QSqlQuery query(db);check(query.exec(sql),"execute test metadata change");query.finish();db.close();
+  }
+  QSqlDatabase::removeDatabase(name);
+}
 static void checkPreparedSegyRelocation(const QTemporaryDir& temp) {
   const auto source=temp.filePath("prepared.sgy");
   const QByteArray bytes="synthetic prepared SEG-Y source; no amplitude decoding required\n";
@@ -35,15 +46,40 @@ static void checkPreparedSegyRelocation(const QTemporaryDir& temp) {
   check(reader.prepareSourceRelocation(sourceId,u(candidate),prepared,error),error);
   check(prepared->verifiedBytes()==bytes.size(),"SHA source reads exactly its bytes");
   check(!reader.commitSourceRelocation(*prepared,error),"read-only publication rejected");
+  check(!reader.openProjectForSourceRelocation(*prepared,error),"minimal opener cannot upgrade read-only connection");
   DataService other;check(other.createProject(u(temp.filePath("other-project")),"other",error),error);
   check(!other.commitSourceRelocation(*prepared,error),"cross-project plan rejected");
+  check(!other.openProjectForSourceRelocation(*prepared,error),"minimal opener cannot rebind another project");
   QFile changedCandidate(candidate);check(changedCandidate.open(QIODevice::Append),"change candidate");
   changedCandidate.write("changed");changedCandidate.close();
   check(!service.commitSourceRelocation(*prepared,error),"candidate drift rejected before publication");
   check(!reader.prepareSourceRelocation(sourceId,u(candidate),prepared,error,[]{return true;})&&!prepared,"cancel clears prepared output");
   check(QFile::remove(candidate)&&QFile::copy(source,candidate),"restore private candidate");
   check(reader.prepareSourceRelocation(sourceId,u(candidate),prepared,error),error);
-  check(service.commitSourceRelocation(*prepared,error),error);
+  const auto project=temp.filePath("segy-project");
+  WellInfo sentinel;sentinel.wellName="NORMALIZATION-GUARD";sentinel.wellheadX=500000;sentinel.wellheadY=4000000;
+  sentinel.coordinateSystem="EPSG:32650";sentinel.coordinateUnit="m";long long sentinelId=0;
+  check(service.createWell(sentinel,sentinelId,error),error);
+  executeAt(project,"UPDATE wells SET crs='UTM84-50N' WHERE id="+QString::number(sentinelId));
+  executeAt(project,"CREATE TRIGGER reject_unrelated_crs_update BEFORE UPDATE OF crs ON wells BEGIN SELECT RAISE(ABORT,'source publication must not normalize coordinates'); END");
+  executeAt(project,"UPDATE ds_meta SET value='2' WHERE key='schema_version'");
+  DataService publisher;
+  check(!publisher.openProjectForSourceRelocation(*prepared,error),"minimal opener rejects future schema");
+  check(!service.commitSourceRelocation(*prepared,error),"already-open publisher rechecks future schema inside transaction");
+  executeAt(project,"UPDATE ds_meta SET value='1' WHERE key='schema_version'");
+  check(publisher.openProjectForSourceRelocation(*prepared,error),error);
+  reader.closeProject();
+  check(reader.openProjectForSourceRelocation(*prepared,error),"closed read-only preparer can reopen for minimal publication");
+  check(reader.commitSourceRelocation(*prepared,error),error);
+  check(!publisher.commitSourceRelocation(*prepared,error),"another minimal writer rejects stale prepared row");
+  // The trigger would abort a field-wide CRS normalization. Querying afterward
+  // also proves the sentinel's original representation was not silently changed.
+  {
+    const auto connection="relocation-sentinel-"+QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {auto db=QSqlDatabase::addDatabase("QSQLITE",connection);db.setDatabaseName(project+"/data.sqlite");check(db.open(),"open sentinel");
+     QSqlQuery query(db);check(query.exec("SELECT crs FROM wells WHERE id="+QString::number(sentinelId))&&query.next()&&query.value(0).toString()=="UTM84-50N","minimal publication preserves unrelated coordinates");}
+    QSqlDatabase::removeDatabase(connection);
+  }
   check(!service.commitSourceRelocation(*prepared,error),"source-row CAS rejects stale plan");
   check(service.verifySource(sourceId,error),error);
   std::vector<DataEntry> volumes;

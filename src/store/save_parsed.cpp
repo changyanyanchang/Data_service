@@ -13,7 +13,7 @@ QJsonObject timeDepthJson(const TimeDepthTable& td){
         {"y",QJsonValue::fromVariant(number(p.y))},
         {"z",QJsonValue::fromVariant(number(p.z))}});
     return {{"depth",depthJson(td.depthInfo)},{"timeUnit",q(td.timeUnit)},
-        {"timeType",q(td.timeType)},{"timeReference",q(td.timeReference)},
+        {"timeType",q(td.timeType)},{"timeReference",q(td.timeReference)},{"timeSign",q(td.timeSign)},
         {"positionDepth",depthJson(td.positionDepthInfo)},
         {"coordinateSystem",q(td.coordinateSystem)},{"coordinateUnit",q(td.coordinateUnit)},
         {"sourceSheet",q(td.sourceSheet)},{"points",points}};

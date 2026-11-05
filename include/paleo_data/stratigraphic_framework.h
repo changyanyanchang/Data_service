@@ -8,6 +8,7 @@
 #include "model.h"
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -153,7 +154,7 @@ struct SeismicStratigraphyBuildOptions {
     int subIntervalCount = SubIntervalCount; // 默认 4（S1..S4 四等分）
     bool autoDetectTimeSign = true;    // 自动识别负 TWT（如 Petrel checkshot 海拔以下为负）并转为正双程时
     bool materializeWellTracks = true; // 同步在井上生成 '地震层位' 与 '地震小层' 分层道及 '地震层位标志层'
-    bool overwriteExistingTracks = true;
+    bool overwriteExistingTracks = true; // 发布本方案新修订的物化道；旧修订/用户道保留。false则保留已有本方案物化道。
 };
 
 struct SeismicStratigraphyBuildReport {
@@ -187,10 +188,12 @@ struct WellStratigraphicSelector {
     StratigraphicTrackSource source = StratigraphicTrackSource::SeismicFramework;
     std::string schemeId = "default";
     std::string revision;       // 空表示当前头修订
-    SubIntervalId subIntervalId;// 优先：四等分小层 ID（如 "T70-T72-S1"）
-    IntervalId intervalId;      // 备选：父层段 ID（如 "T70-T72"）
+    SubIntervalId subIntervalId;// 已保存方案的小层稳定 ID；显示名请用 unitName。
+    IntervalId intervalId;      // 已保存方案的父层稳定 ID；与 subIntervalId 同填时须为其父层。
     std::string trackName;      // WellIntervalTrack 时的分层道名（如 "段"、"组"、"地震小层"）；空则匹配任意道
     std::string unitName;       // 层位/小层显示名（如 "T70-T72-S1"、"T70-T72"、"文昌组"、"文三段"）
+    long long trackId = 0;      // WellIntervalTrack 的精确道 ID；0 仅允许无歧义的名称查询。
+    long long intervalRecordId = 0; // 同一道可有同名单元，指定记录 ID 可消除歧义。
 };
 
 struct WellIntervalLogQuery {
@@ -201,6 +204,12 @@ struct WellIntervalLogQuery {
     bool includeAuxiliaryIntervals = true; // 同时返回该深度窗内的岩性/测井解释结论等辅助道切片
     double resampleStepMeters = 0.0;       // <=0 保留原深度轴；>0 按指定步长（m）对齐公共深度轴
     int normalizedSampleCount = 0;         // >0 时额外输出 [0,1] 相对深度重采样（如 64 点供神经网络输入）
+    long long maxValues = 8000000;         // 所有井的原生/重采样输出数值总预算，1..64000000。
+    int maxSamplesPerWell = 1000000;       // 单井任一结果轴样点上限，1..4000000。
+    std::function<bool()> cancelled;       // 在调用线程检查；取消/预算失败不返回部分结果。
+    int maxAuxiliaryTracks = 64;            // 所有井检视的辅助道总数，1..4096。
+    long long maxAuxiliaryRecords = 100000; // 所有辅助道检视/输出的记录总数，1..1000000。
+    long long maxAuxiliaryBytes = 16777216; // 辅助元数据/文本及记录工作集预算，1..67108864 字节。
 };
 
 struct IntervalRecord {
@@ -241,7 +250,7 @@ struct WellStratigraphicLogSlice {
     std::string unitId;         // 如 "T70-T72-S1"
     std::string unitName;       // 如 "T70-T72-S1" 或 "文三段"
     std::string trackName;      // 来源道名称（如 "地震小层"、"段"）
-    std::string depthType = "MD", depthUnit = "m";
+    std::string depthType, depthUnit; // 未确认时保持未知；不得自动补成 MD/m。
     double topDepth = Missing, bottomDepth = Missing;
     double topTimeMs = Missing, bottomTimeMs = Missing; // 若具备时深表，同步给出顶底 TWT(ms)
     double thickness = Missing;
@@ -255,6 +264,8 @@ struct WellStratigraphicLogSlice {
 
     // 该层段深度窗内的辅助分层道记录（如岩性道、电测解释道、已有相标签）
     std::vector<IntervalTrackResult> auxiliaryTracks;
+    long long trackId = 0, intervalRecordId = 0;
+    std::string schemeId, schemeRevision, timeReference;
 };
 
 namespace framework {

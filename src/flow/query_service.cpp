@@ -16,6 +16,22 @@ bool DataService::openProject(const std::string& path,std::string& error){
     return true;
 }
 bool DataService::openProjectReadOnly(const std::string& path,std::string& error){return impl_->store.open(q(path),false,{},error,true);}
+bool DataService::openProjectForSourceRelocation(const PreparedSourceRelocation& prepared,std::string& error){
+    error.clear();auto& store=impl_->store;
+    if(store.db.isOpen()){
+        if(store.readOnly){error="只读工区不能重定位来源";return false;}
+        if(s(QDir::cleanPath(store.root))!=prepared.root_){error="来源准备结果属于其他工区";return false;}
+        QSqlQuery schema;
+        if(!store.exec("SELECT value FROM ds_meta WHERE key='schema_version'",{},error,&schema)||!schema.next()||schema.value(0).toString()!="1"){
+            error="工区格式不受支持";return false;
+        }
+        return true;
+    }
+    // The normal project open additionally scans/normalizes every well and CRS
+    // candidate. Source location publication needs only the prepared project's
+    // schema gate and indexed source transaction.
+    return store.open(q(prepared.root_),false,{},error);
+}
 bool DataService::snapshotDatabase(const std::string& destination,std::string& error)const{
     if(!impl_->store.db.isOpen()){error="请先打开工区";return false;}
     return impl_->store.exec("VACUUM INTO ?",{q(destination)},error);

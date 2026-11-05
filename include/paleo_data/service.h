@@ -241,6 +241,10 @@ public:
     // Read existing data only: no schema upgrades, imports or edits. A separate
     // instance is required for each worker thread, as for writable sessions.
     bool openProjectReadOnly(const std::string& directory, std::string& error);
+    // Open the project bound to a verified relocation token without running
+    // field-wide coordinate normalization. Existing read-only/other-project
+    // connections are never upgraded or rebound by this operation.
+    bool openProjectForSourceRelocation(const PreparedSourceRelocation& prepared, std::string& error);
     bool isReadOnly() const;
     // Consistent SQLite snapshot including committed WAL; destination must not exist.
     // Copies the database only; external source references retain their meaning.
