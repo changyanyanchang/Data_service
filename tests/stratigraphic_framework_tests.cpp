@@ -217,6 +217,60 @@ static void legacyProjectWithoutFramework()
     std::vector<SubIntervalResultBinding> r; CHECK(ro.listSubIntervalResults("x", {}, r, err) && r.empty());
 }
 
+static void consumerScopedInvalidation()
+{
+    QTemporaryDir dir;std::string error;DataService service;
+    CHECK(service.createProject(dir.filePath("consumer-model").toStdString(),"consumer invalidation",error));
+    StratigraphicScheme original;std::vector<FrameworkIssue> issues;
+    CHECK(service.commitStratigraphicScheme(synthetic(),{},original,issues,error));
+    const auto subs=fw::subIntervalsOf(original,original.intervals.front().id);
+    const auto bind=[&](const std::string& id,const std::string& kind,long long well,int index,const StratigraphicScheme& scheme) {
+        SubIntervalResultBinding binding,stored;binding.id=id;binding.kind=kind;binding.wellId=well;binding.schemeId=scheme.id;
+        binding.schemeRevision=scheme.revision;binding.subInterval=subs[size_t(index-1)]->id;binding.assetRef="frozen:"+id;
+        CHECK(service.bindSubIntervalResult(binding,stored,error));
+    };
+    bind("well-1","well_facies",1,2,original);bind("well-2","well_facies",2,2,original);
+    bind("seismic-2","seismic_facies",0,2,original);bind("seismic-4","seismic_facies",0,4,original);
+    bind("legacy-global","single_factor",0,2,original);
+    auto other=synthetic();other.id="other-scheme";StratigraphicScheme otherHead;
+    CHECK(service.commitStratigraphicScheme(other,{},otherHead,issues,error));bind("other-result","seismic_facies",0,2,otherHead);
+    const auto status=[&](const std::string& scheme,const std::string& id) {
+        std::vector<SubIntervalResultBinding> rows;CHECK(service.listSubIntervalResults(scheme,{},rows,error));
+        const auto found=std::find_if(rows.begin(),rows.end(),[&](const auto& row){return row.id==id;});
+        CHECK(found!=rows.end());return found==rows.end()?std::string():found->status;
+    };
+    auto changed=original;
+    for(auto& occurrence:changed.wellOccurrences)if(occurrence.wellId==1&&occurrence.interval==changed.intervals.front().id)
+        occurrence.internal[1]=1060;
+    CHECK(fw::wellSubIntervalFingerprint(original,subs[1]->id,1)!=fw::wellSubIntervalFingerprint(changed,subs[1]->id,1));
+    CHECK(fw::wellSubIntervalFingerprint(original,subs[1]->id,2)==fw::wellSubIntervalFingerprint(changed,subs[1]->id,2));
+    CHECK(fw::seismicSubIntervalFingerprint(original,subs[1]->id)==fw::seismicSubIntervalFingerprint(changed,subs[1]->id));
+    StratigraphicScheme wellHead;CHECK(service.commitStratigraphicScheme(changed,original.revision.value,wellHead,issues,error));
+    CHECK(status(original.id,"well-1")=="stale"&&status(original.id,"well-2")=="current");
+    CHECK(status(original.id,"seismic-2")=="current"&&status(original.id,"legacy-global")=="stale");
+    auto rebound=wellHead;
+    for(auto& boundary:rebound.boundaries)if(boundary.id==rebound.intervals.front().top)boundary.seismicHorizonResourceId=987;
+    CHECK(fw::subIntervalFingerprint(wellHead,subs[1]->id)==fw::subIntervalFingerprint(rebound,subs[1]->id));
+    CHECK(fw::seismicSubIntervalFingerprint(wellHead,subs[1]->id)!=fw::seismicSubIntervalFingerprint(rebound,subs[1]->id));
+    std::vector<SubIntervalId> affected;std::vector<SubIntervalResultBinding> outputs;
+    CHECK(service.previewStratigraphicImpact(rebound,affected,outputs,error));CHECK(affected.size()==4&&outputs.size()==2);
+    StratigraphicScheme surfaceHead;CHECK(service.commitStratigraphicScheme(rebound,wellHead.revision.value,surfaceHead,issues,error));
+    CHECK(status(original.id,"well-2")=="current"&&status(original.id,"seismic-2")=="stale");
+    CHECK(status(otherHead.id,"other-result")=="current");
+    bind("current-s2","seismic_facies",0,2,surfaceHead);bind("current-s4","seismic_facies",0,4,surfaceHead);
+    bind("explicit-well-1","well_facies",1,2,surfaceHead);
+    auto divided=surfaceHead;divided.divisions.front().fractions={.25,.6,.75};
+    StratigraphicScheme divisionHead;CHECK(service.commitStratigraphicScheme(divided,surfaceHead.revision.value,divisionHead,issues,error));
+    CHECK(status(original.id,"current-s2")=="stale"&&status(original.id,"current-s4")=="current");
+    CHECK(status(original.id,"explicit-well-1")=="current"); // its explicit MD edge overrides the changed fraction.
+    StratigraphicScheme historical;CHECK(service.readStratigraphicScheme(original.id,original.revision.value,historical,error));
+    CHECK(fw::wellSubIntervalFingerprint(original,subs[1]->id,1)==fw::wellSubIntervalFingerprint(historical,subs[1]->id,1));
+    CHECK(fw::seismicSubIntervalFingerprint(original,subs[1]->id)==fw::seismicSubIntervalFingerprint(historical,subs[1]->id));
+    service.closeProject();CHECK(service.openProjectReadOnly(dir.filePath("consumer-model").toStdString(),error));
+    CHECK(status(original.id,"current-s2")=="stale"&&status(original.id,"well-2")=="stale");
+    CHECK(status(original.id,"current-s4")=="current"&&status(otherHead.id,"other-result")=="current");
+}
+
 static void writeSegyFixture(const QString& path)
 {
     auto u16 = [](QByteArray& bytes, int offset, quint16 value) { qToBigEndian(value, bytes.data() + offset); };
@@ -672,6 +726,7 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     pureModel(); seismicMask(); persistence(); legacyProjectWithoutFramework();
+    consumerScopedInvalidation();
     seismicStratigraphyAndQueryApis();
     strictSelectionAndBudgets();
     if (failures) { std::cerr << failures << " failures\n"; return 1; }

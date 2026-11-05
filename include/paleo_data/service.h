@@ -7,6 +7,7 @@
 #include "interpretation.h"
 #include "stratigraphic_framework.h"
 #include "source_relocation.h"
+#include "object_descriptor.h"
 #include <memory>
 #include <cstdint>
 
@@ -249,6 +250,10 @@ public:
     // Consistent SQLite snapshot including committed WAL; destination must not exist.
     // Copies the database only; external source references retain their meaning.
     bool snapshotDatabase(const std::string& destination, std::string& error) const;
+    // Runs the bundled Qt-SQL worker; cancellation/timeout never publishes a
+    // partial destination. Callbacks run on the caller's thread.
+    bool snapshotDatabaseCancellable(const std::string& destination, std::string& error,
+                                     const CancelCheck& cancelled, int timeoutMs = 300000) const;
     void closeProject();
     std::string projectPath() const;
     std::string projectName() const;
@@ -292,6 +297,11 @@ public:
     bool listData(const std::string& kind, long long wellId, std::vector<DataEntry>& result, std::string& error) const;
     // Filter in SQLite, without listing every other source in the work area.
     bool listSourceData(const std::string& kind, long long sourceId, std::vector<DataEntry>& result, std::string& error) const;
+    // Indexed metadata identity; never loads numeric arrays or seismic samples.
+    bool describeDataObject(DataObjectKind kind,long long id,DataObjectDescriptor& result,std::string& error) const;
+    // One read snapshot, exact change token, bounded payload; no current/first-object fallback.
+    bool readTimeDepthAtRevision(long long id,const std::string& revision,TimeDepthTable& result,std::string& error,
+                                 const CancelCheck& cancelled={},long long maxPoints=1000000) const;
     bool readTable(const std::string& kind, long long id, long long offset, int limit, DataTable& result, std::string& error) const;
     // 真正读取曲线数组。范围含端点；topDepth/bottomDepth 为 Missing 时不限制相应端。
     // processed=true 读取处理值，false 读取原值；两种模式都返回 rawValues 与 quality。

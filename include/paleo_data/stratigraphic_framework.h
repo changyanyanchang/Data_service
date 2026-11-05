@@ -296,6 +296,13 @@ SeismicSubIntervalMask seismicMask(const std::vector<double>& topTime, const std
 std::vector<SubIntervalId> impactedSubIntervals(const StratigraphicScheme& before, const StratigraphicScheme& after);
 // 稳定缓存键片段：SubIntervalId + 影响该层段几何的内容指纹。
 std::string subIntervalFingerprint(const StratigraphicScheme& scheme, const SubIntervalId& id);
+// Direct MD consumers depend on this well's effective bounds, not other wells or seismic resource bindings.
+std::string wellSubIntervalFingerprint(const StratigraphicScheme& scheme, const SubIntervalId& id, long long wellId);
+// Time-window amplitude consumers depend on surface resource IDs and the two effective fractional edges, not MD occurrences.
+std::string seismicSubIntervalFingerprint(const StratigraphicScheme& scheme, const SubIntervalId& id);
+// well_facies + positive wellId and seismic_facies select the above contracts.
+// Other/legacy kinds retain subIntervalFingerprint; aggregate combines the parent's children.
+std::string resultGeometryFingerprint(const StratigraphicScheme& scheme, const SubIntervalResultBinding& binding);
 // 历史单界面/显示名标签 → 候选关联。只有显式 "顶–底/Sk" 或 "顶–底" 且界面相邻时给候选，
 // 单个界面名（如 "T70"）一律 legacy_unresolved，绝不默认归入 S1。
 LegacyUnitResolution resolveLegacyLabel(const StratigraphicScheme& scheme, const std::string& label);

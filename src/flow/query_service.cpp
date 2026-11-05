@@ -32,10 +32,6 @@ bool DataService::openProjectForSourceRelocation(const PreparedSourceRelocation&
     // schema gate and indexed source transaction.
     return store.open(q(prepared.root_),false,{},error);
 }
-bool DataService::snapshotDatabase(const std::string& destination,std::string& error)const{
-    if(!impl_->store.db.isOpen()){error="请先打开工区";return false;}
-    return impl_->store.exec("VACUUM INTO ?",{q(destination)},error);
-}
 bool DataService::isReadOnly()const{return impl_->store.readOnly;}
 void DataService::closeProject(){impl_->store.close();}
 std::string DataService::projectPath()const{return s(impl_->store.root);}

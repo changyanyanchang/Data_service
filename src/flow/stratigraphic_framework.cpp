@@ -344,6 +344,50 @@ std::string subIntervalFingerprint(const StratigraphicScheme& s, const SubInterv
     return fnv(text.str());
 }
 
+std::string wellSubIntervalFingerprint(const StratigraphicScheme& s, const SubIntervalId& id, long long wellId)
+{
+    const auto* sub=findSubInterval(s,id);
+    const auto* interval=sub?findInterval(s,sub->interval):nullptr;
+    if(!interval || wellId<=0)return {};
+    const auto range=wellRange(s,wellId,id);
+    std::ostringstream text;
+    text<<"well-md-v1|"<<id.value<<'|'<<sub->index<<'|'<<sub->status<<'|'<<interval->top.value<<'|'<<interval->bottom.value
+        <<'|'<<interval->status<<'|'<<wellId<<'|'<<range.depthType<<'|'<<range.depthUnit<<'|'<<range.resolved
+        <<'|'<<num(range.top)<<'|'<<num(range.bottom);
+    return fnv(text.str());
+}
+
+std::string seismicSubIntervalFingerprint(const StratigraphicScheme& s, const SubIntervalId& id)
+{
+    const auto* sub=findSubInterval(s,id);
+    const auto* interval=sub?findInterval(s,sub->interval):nullptr;
+    if(!interval || sub->index<1 || sub->index>SubIntervalCount)return {};
+    const auto* top=findBoundary(s,interval->top);
+    const auto* bottom=findBoundary(s,interval->bottom);
+    std::array<double,5> edges{0.,.25,.5,.75,1.};
+    if(const auto* division=divisionOf(s,interval->id))
+        edges={0.,division->fractions[0],division->fractions[1],division->fractions[2],1.};
+    std::ostringstream text;
+    text<<"seismic-window-v1|"<<id.value<<'|'<<sub->index<<'|'<<sub->status<<'|'<<interval->top.value<<'|'<<interval->bottom.value
+        <<'|'<<interval->status<<'|'<<(top?top->seismicHorizonResourceId:0)<<'|'<<(bottom?bottom->seismicHorizonResourceId:0)
+        <<'|'<<num(edges[size_t(sub->index-1)])<<'|'<<num(edges[size_t(sub->index)]);
+    return fnv(text.str());
+}
+
+std::string resultGeometryFingerprint(const StratigraphicScheme& s, const SubIntervalResultBinding& binding)
+{
+    const auto one=[&](const SubIntervalId& id) {
+        if(binding.kind=="well_facies" && binding.wellId>0)return wellSubIntervalFingerprint(s,id,binding.wellId);
+        if(binding.kind=="seismic_facies")return seismicSubIntervalFingerprint(s,id);
+        return subIntervalFingerprint(s,id);
+    };
+    if(!binding.subInterval.empty())return one(binding.subInterval);
+    if(!binding.aggregate || !findInterval(s,binding.interval))return {};
+    std::ostringstream text;
+    for(const auto* sub:subIntervalsOf(s,binding.interval))text<<sub->id.value<<':'<<one(sub->id)<<'|';
+    return fnv(text.str());
+}
+
 std::vector<SubIntervalId> impactedSubIntervals(const StratigraphicScheme& before, const StratigraphicScheme& after)
 {
     std::vector<SubIntervalId> out;
