@@ -6,6 +6,8 @@
 #include <utility>
 #include "interpretation.h"
 #include "stratigraphic_framework.h"
+#include "source_relocation.h"
+#include "object_descriptor.h"
 #include <memory>
 #include <cstdint>
 
@@ -240,10 +242,18 @@ public:
     // Read existing data only: no schema upgrades, imports or edits. A separate
     // instance is required for each worker thread, as for writable sessions.
     bool openProjectReadOnly(const std::string& directory, std::string& error);
+    // Open the project bound to a verified relocation token without running
+    // field-wide coordinate normalization. Existing read-only/other-project
+    // connections are never upgraded or rebound by this operation.
+    bool openProjectForSourceRelocation(const PreparedSourceRelocation& prepared, std::string& error);
     bool isReadOnly() const;
     // Consistent SQLite snapshot including committed WAL; destination must not exist.
     // Copies the database only; external source references retain their meaning.
     bool snapshotDatabase(const std::string& destination, std::string& error) const;
+    // Runs the bundled Qt-SQL worker; cancellation/timeout never publishes a
+    // partial destination. Callbacks run on the caller's thread.
+    bool snapshotDatabaseCancellable(const std::string& destination, std::string& error,
+                                     const CancelCheck& cancelled, int timeoutMs = 300000) const;
     void closeProject();
     std::string projectPath() const;
     std::string projectName() const;
@@ -287,6 +297,11 @@ public:
     bool listData(const std::string& kind, long long wellId, std::vector<DataEntry>& result, std::string& error) const;
     // Filter in SQLite, without listing every other source in the work area.
     bool listSourceData(const std::string& kind, long long sourceId, std::vector<DataEntry>& result, std::string& error) const;
+    // Indexed metadata identity; never loads numeric arrays or seismic samples.
+    bool describeDataObject(DataObjectKind kind,long long id,DataObjectDescriptor& result,std::string& error) const;
+    // One read snapshot, exact change token, bounded payload; no current/first-object fallback.
+    bool readTimeDepthAtRevision(long long id,const std::string& revision,TimeDepthTable& result,std::string& error,
+                                 const CancelCheck& cancelled={},long long maxPoints=1000000) const;
     bool readTable(const std::string& kind, long long id, long long offset, int limit, DataTable& result, std::string& error) const;
     // 真正读取曲线数组。范围含端点；topDepth/bottomDepth 为 Missing 时不限制相应端。
     // processed=true 读取处理值，false 读取原值；两种模式都返回 rawValues 与 quality。
@@ -314,6 +329,8 @@ public:
     bool deleteData(const std::string& kind, long long id, std::string& error); // DB records only; external files never deleted
     bool listSources(std::vector<SourceEntry>& result, std::string& error) const;
     bool listSourceIndexEntries(std::vector<SourceIndexEntry>& result, std::string& error) const;
+    // Indexed lookup: no enumeration of every source in a large work area.
+    bool readSourceIndexEntry(long long sourceId, SourceIndexEntry& result, std::string& error) const;
     // Relations are directed from sourceId to targetSourceId. Repeating the same
     // relation updates its note and returns the existing stable relation ID.
     bool relateSources(long long sourceId, long long targetSourceId, const std::string& relation,
@@ -331,6 +348,12 @@ public:
     bool verifySource(long long sourceId, std::string& error) const; // SEG-Y uses size/mtime/header fingerprint; other sources SHA-256
     bool readDocument(long long sourceId, std::string& text, std::string& error) const;
     bool relocateSource(long long sourceId, const std::string& path, std::string& error);
+    bool prepareSourceRelocation(long long sourceId, const std::string& path,
+        std::shared_ptr<const PreparedSourceRelocation>& result, std::string& error,
+        const CancelCheck& cancelled={}) const;
+    // Owner-thread metadata transaction only. The prepare token is project-bound;
+    // a changed source row or candidate stamp rejects publication.
+    bool commitSourceRelocation(const PreparedSourceRelocation& prepared, std::string& error);
     bool readSampleTable(long long tableId, SampleTable& result, std::string& error) const;
     // 返回完整时深点数组及深度/时间约定；保留负时间和未知单位，不自动换算
     //（已确认 negated 符号约定的来源按确认口径交付，见 confirmTimeDepthSemantics）。
@@ -379,7 +402,7 @@ public:
     static bool readSeismicFileLine(const std::string& path, const std::string& direction, int lineNumber,
         const SectionReadOptions& options, SeismicSectionResult& result, std::string& error, const CancelCheck& cancelled={});
     static bool readSeismicFileTimeSlice(const std::string& path, double timeMs, const TimeSliceReadOptions& options,
-        SeismicTimeSliceResult& result, std::string& error, const CancelCheck& cancelled={});
+        SeismicTimeSliceResult& result, std::string& error, const CancelCheck& cancelled={}, const TimeSliceTileCallback& tileReady={});
     // Ordered inline/crossline path, independent of unconfirmed map-coordinate conventions.
     bool readSeismicGridSection(long long volumeId, const std::vector<std::pair<int,int>>& path,
         int maxColumns, bool interpolate, bool keepOutside, SeismicSectionResult& result, std::string& error, const CancelCheck& cancelled={});

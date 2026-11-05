@@ -16,9 +16,21 @@ bool DataService::openProject(const std::string& path,std::string& error){
     return true;
 }
 bool DataService::openProjectReadOnly(const std::string& path,std::string& error){return impl_->store.open(q(path),false,{},error,true);}
-bool DataService::snapshotDatabase(const std::string& destination,std::string& error)const{
-    if(!impl_->store.db.isOpen()){error="请先打开工区";return false;}
-    return impl_->store.exec("VACUUM INTO ?",{q(destination)},error);
+bool DataService::openProjectForSourceRelocation(const PreparedSourceRelocation& prepared,std::string& error){
+    error.clear();auto& store=impl_->store;
+    if(store.db.isOpen()){
+        if(store.readOnly){error="只读工区不能重定位来源";return false;}
+        if(s(QDir::cleanPath(store.root))!=prepared.root_){error="来源准备结果属于其他工区";return false;}
+        QSqlQuery schema;
+        if(!store.exec("SELECT value FROM ds_meta WHERE key='schema_version'",{},error,&schema)||!schema.next()||schema.value(0).toString()!="1"){
+            error="工区格式不受支持";return false;
+        }
+        return true;
+    }
+    // The normal project open additionally scans/normalizes every well and CRS
+    // candidate. Source location publication needs only the prepared project's
+    // schema gate and indexed source transaction.
+    return store.open(q(prepared.root_),false,{},error);
 }
 bool DataService::isReadOnly()const{return impl_->store.readOnly;}
 void DataService::closeProject(){impl_->store.close();}
@@ -132,6 +144,14 @@ bool DataService::listSourceIndexEntries(std::vector<SourceIndexEntry>& out,std:
         row.kind=s(r.value(3).toString());row.status=s(r.value(4).toString());row.message=s(r.value(5).toString());
         row.bytes=r.value(6).toLongLong();row.sha256=s(r.value(7).toString());row.active=r.value(8).toBool();out.push_back(std::move(row));
     }return true;
+}
+bool DataService::readSourceIndexEntry(long long id,SourceIndexEntry& out,std::string& e)const{
+    out={};e.clear();QSqlQuery r;
+    if(!impl_->store.exec("SELECT id,original_path,stored_path,kind,status,message,bytes,hash,active FROM sources WHERE id=?",{id},e,&r))return false;
+    if(!r.next()){e="来源记录不存在";return false;}
+    out.id=r.value(0).toLongLong();out.path=s(r.value(1).toString());out.storedPath=s(r.value(2).toString());
+    out.kind=s(r.value(3).toString());out.status=s(r.value(4).toString());out.message=s(r.value(5).toString());
+    out.bytes=r.value(6).toLongLong();out.sha256=s(r.value(7).toString());out.active=r.value(8).toBool();return true;
 }
 bool DataService::listIssues(bool unresolved,std::vector<IssueEntry>& out,std::string& e)const{out.clear();QSqlQuery r;if(!impl_->store.exec("SELECT id,source_id,code,message,original_text,sheet,resolution,row_num,blocking,resolved FROM issues WHERE (?=0 OR resolved=0) ORDER BY blocking DESC,id",{unresolved},e,&r))return false;while(r.next())out.push_back({r.value(0).toLongLong(),r.value(1).toLongLong(),s(r.value(2).toString()),s(r.value(3).toString()),s(r.value(4).toString()),s(r.value(5).toString()),s(r.value(6).toString()),r.value(7).toInt(),r.value(8).toBool(),r.value(9).toBool()});return true;}
 bool DataService::sourcePath(long long id,std::string& path,std::string& e)const{QSqlQuery r;if(!impl_->store.exec("SELECT stored_path FROM sources WHERE id=?",{id},e,&r))return false;if(!r.next()){e="来源记录不存在";return false;}path=s(impl_->store.absolutePath(r.value(0).toString()));return true;}

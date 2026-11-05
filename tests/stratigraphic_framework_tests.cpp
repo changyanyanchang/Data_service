@@ -4,11 +4,15 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QTemporaryDir>
+#include <QUuid>
 #include <QtEndian>
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <stdexcept>
 
@@ -213,6 +217,60 @@ static void legacyProjectWithoutFramework()
     std::vector<SubIntervalResultBinding> r; CHECK(ro.listSubIntervalResults("x", {}, r, err) && r.empty());
 }
 
+static void consumerScopedInvalidation()
+{
+    QTemporaryDir dir;std::string error;DataService service;
+    CHECK(service.createProject(dir.filePath("consumer-model").toStdString(),"consumer invalidation",error));
+    StratigraphicScheme original;std::vector<FrameworkIssue> issues;
+    CHECK(service.commitStratigraphicScheme(synthetic(),{},original,issues,error));
+    const auto subs=fw::subIntervalsOf(original,original.intervals.front().id);
+    const auto bind=[&](const std::string& id,const std::string& kind,long long well,int index,const StratigraphicScheme& scheme) {
+        SubIntervalResultBinding binding,stored;binding.id=id;binding.kind=kind;binding.wellId=well;binding.schemeId=scheme.id;
+        binding.schemeRevision=scheme.revision;binding.subInterval=subs[size_t(index-1)]->id;binding.assetRef="frozen:"+id;
+        CHECK(service.bindSubIntervalResult(binding,stored,error));
+    };
+    bind("well-1","well_facies",1,2,original);bind("well-2","well_facies",2,2,original);
+    bind("seismic-2","seismic_facies",0,2,original);bind("seismic-4","seismic_facies",0,4,original);
+    bind("legacy-global","single_factor",0,2,original);
+    auto other=synthetic();other.id="other-scheme";StratigraphicScheme otherHead;
+    CHECK(service.commitStratigraphicScheme(other,{},otherHead,issues,error));bind("other-result","seismic_facies",0,2,otherHead);
+    const auto status=[&](const std::string& scheme,const std::string& id) {
+        std::vector<SubIntervalResultBinding> rows;CHECK(service.listSubIntervalResults(scheme,{},rows,error));
+        const auto found=std::find_if(rows.begin(),rows.end(),[&](const auto& row){return row.id==id;});
+        CHECK(found!=rows.end());return found==rows.end()?std::string():found->status;
+    };
+    auto changed=original;
+    for(auto& occurrence:changed.wellOccurrences)if(occurrence.wellId==1&&occurrence.interval==changed.intervals.front().id)
+        occurrence.internal[1]=1060;
+    CHECK(fw::wellSubIntervalFingerprint(original,subs[1]->id,1)!=fw::wellSubIntervalFingerprint(changed,subs[1]->id,1));
+    CHECK(fw::wellSubIntervalFingerprint(original,subs[1]->id,2)==fw::wellSubIntervalFingerprint(changed,subs[1]->id,2));
+    CHECK(fw::seismicSubIntervalFingerprint(original,subs[1]->id)==fw::seismicSubIntervalFingerprint(changed,subs[1]->id));
+    StratigraphicScheme wellHead;CHECK(service.commitStratigraphicScheme(changed,original.revision.value,wellHead,issues,error));
+    CHECK(status(original.id,"well-1")=="stale"&&status(original.id,"well-2")=="current");
+    CHECK(status(original.id,"seismic-2")=="current"&&status(original.id,"legacy-global")=="stale");
+    auto rebound=wellHead;
+    for(auto& boundary:rebound.boundaries)if(boundary.id==rebound.intervals.front().top)boundary.seismicHorizonResourceId=987;
+    CHECK(fw::subIntervalFingerprint(wellHead,subs[1]->id)==fw::subIntervalFingerprint(rebound,subs[1]->id));
+    CHECK(fw::seismicSubIntervalFingerprint(wellHead,subs[1]->id)!=fw::seismicSubIntervalFingerprint(rebound,subs[1]->id));
+    std::vector<SubIntervalId> affected;std::vector<SubIntervalResultBinding> outputs;
+    CHECK(service.previewStratigraphicImpact(rebound,affected,outputs,error));CHECK(affected.size()==4&&outputs.size()==2);
+    StratigraphicScheme surfaceHead;CHECK(service.commitStratigraphicScheme(rebound,wellHead.revision.value,surfaceHead,issues,error));
+    CHECK(status(original.id,"well-2")=="current"&&status(original.id,"seismic-2")=="stale");
+    CHECK(status(otherHead.id,"other-result")=="current");
+    bind("current-s2","seismic_facies",0,2,surfaceHead);bind("current-s4","seismic_facies",0,4,surfaceHead);
+    bind("explicit-well-1","well_facies",1,2,surfaceHead);
+    auto divided=surfaceHead;divided.divisions.front().fractions={.25,.6,.75};
+    StratigraphicScheme divisionHead;CHECK(service.commitStratigraphicScheme(divided,surfaceHead.revision.value,divisionHead,issues,error));
+    CHECK(status(original.id,"current-s2")=="stale"&&status(original.id,"current-s4")=="current");
+    CHECK(status(original.id,"explicit-well-1")=="current"); // its explicit MD edge overrides the changed fraction.
+    StratigraphicScheme historical;CHECK(service.readStratigraphicScheme(original.id,original.revision.value,historical,error));
+    CHECK(fw::wellSubIntervalFingerprint(original,subs[1]->id,1)==fw::wellSubIntervalFingerprint(historical,subs[1]->id,1));
+    CHECK(fw::seismicSubIntervalFingerprint(original,subs[1]->id)==fw::seismicSubIntervalFingerprint(historical,subs[1]->id));
+    service.closeProject();CHECK(service.openProjectReadOnly(dir.filePath("consumer-model").toStdString(),error));
+    CHECK(status(original.id,"current-s2")=="stale"&&status(original.id,"well-2")=="stale");
+    CHECK(status(original.id,"current-s4")=="current"&&status(otherHead.id,"other-result")=="current");
+}
+
 static void writeSegyFixture(const QString& path)
 {
     auto u16 = [](QByteArray& bytes, int offset, quint16 value) { qToBigEndian(value, bytes.data() + offset); };
@@ -275,6 +333,7 @@ static void seismicStratigraphyAndQueryApis()
         h.coordinateUnit = "m";
         h.timeUnit = "ms";
         h.timeType = "TWT";
+        h.timeReference = "fixture-datum";
         for (int i = 0; i < 2; ++i) {
             for (int j = 0; j < 2; ++j) {
                 // 随 (i, j) 倾斜，使每个空间点拥有不同的层位时间与深度范围
@@ -293,14 +352,18 @@ static void seismicStratigraphyAndQueryApis()
     well.wellInfo.coordinateUnit = "m";
     well.defaultDepthInfo.depthType = "MD";
     well.defaultDepthInfo.depthUnit = "m";
+    well.defaultDepthInfo.mdReference = "KB";
 
     // Petrel 风格负值 TWT 时深关系：1000 ms -> 1500 m, 1400 ms -> 2300 m（斜率 2.0 m/ms）
     TimeDepthTable td;
     td.relationName = "HZ19-1-1_TDR";
     td.depthInfo.depthType = "MD";
     td.depthInfo.depthUnit = "m";
+    td.depthInfo.mdReference = "KB";
     td.timeUnit = "ms";
     td.timeType = "TWT";
+    td.timeReference = "fixture-datum";
+    td.timeSign = "negated";
     td.depthTimePairs = {
         {1500.0, -1000.0, 500000.0, 4000000.0, -1500.0},
         {1900.0, -1200.0, 500000.0, 4000000.0, -1900.0},
@@ -313,6 +376,7 @@ static void seismicStratigraphyAndQueryApis()
     ls.logSetName = "常规测井";
     ls.depthInfo.depthType = "MD";
     ls.depthInfo.depthUnit = "m";
+    ls.depthInfo.mdReference = "KB";
     ls.samplingAxis.sampleStep = 2.0;
     LogCurve gr{"GR", "API", {}, "自然伽马"}, dt{"DT", "us/ft", {}, "声波时差"};
     for (double d = 1500.0; d <= 2200.0; d += 2.0) {
@@ -330,6 +394,7 @@ static void seismicStratigraphyAndQueryApis()
     segTrack.trackType = "地层";
     segTrack.depthInfo.depthType = "MD";
     segTrack.depthInfo.depthUnit = "m";
+    segTrack.depthInfo.mdReference = "KB";
     GeologicalInterval segIv;
     segIv.intervalName = "文三段";
     segIv.topDepth = 1560.0;
@@ -348,6 +413,10 @@ static void seismicStratigraphyAndQueryApis()
     ImportOptions impOpts; impOpts.copySources = false;
     ImportReport impRep;
     CHECK(ds.importFile(segyPath.toUtf8().toStdString(), impOpts, impRep, err));
+    std::vector<DataEntry> volumeEntries;CHECK(ds.listData("volumes",0,volumeEntries,err)&&volumeEntries.size()==1);
+    SeismicVolume volume;CHECK(ds.readVolume(volumeEntries.front().id,volume,err));
+    volume.sampling.timeType="TWT";volume.sampling.timeReference="fixture-datum";
+    CHECK(ds.saveVolume(volumeEntries.front().id,volume,err));
 
     // 借用内部 ProjectStore 保存合成井与层位（或通过 SQL/importPreparedFile）
     // 计算 dummySrc 的 SHA-256 以调用 importPreparedFile
@@ -400,9 +469,11 @@ static void seismicStratigraphyAndQueryApis()
     CHECK(availTracks.size() >= 3);
 
     // 3a. 查询地震小层 T70-T72-S2（1640..1700 m）
+    StratigraphicScheme builtScheme;CHECK(ds.readStratigraphicScheme(buildRep.schemeId,buildRep.revision.value,builtScheme,err));
+    const auto* selectedSub=fw::resolveSubInterval(builtScheme,"T70-T72-S2");CHECK(selectedSub);if(!selectedSub)return;
     WellIntervalLogQuery logQ;
     logQ.stratigraphy.source = StratigraphicTrackSource::SeismicFramework;
-    logQ.stratigraphy.subIntervalId = SubIntervalId{"T70-T72-S2"};
+    logQ.stratigraphy.subIntervalId = selectedSub->id;
     logQ.curveNames = {"GR", "DT"};
     logQ.normalizedSampleCount = 16;
     std::vector<WellStratigraphicLogSlice> logSlices;
@@ -432,12 +503,14 @@ static void seismicStratigraphyAndQueryApis()
     // 4. 验证 readSeismicHorizonWindow：每个空间点具有不同的时间窗与深度窗
     SeismicHorizonWindowQuery winQ;
     winQ.undeclaredTimeUnit="ms";winQ.undeclaredTimeType="TWT";
-    winQ.target.subIntervalId = SubIntervalId{"T70-T72-S2"}; // S2 = [0.25, 0.50]
+    winQ.target.subIntervalId = selectedSub->id; // S2 = [0.25, 0.50], actual persisted ID.
     winQ.domainKind = HorizonSpatialDomainKind::FullHorizonGrid;
     winQ.sampleMode = HorizonWindowSampleMode::ResampledFixedCount;
     winQ.resampledSampleCount = 12;
     winQ.computeWindowAttributes = true;
     winQ.computeDepthRange = true;
+    std::vector<DataEntry> timeDepths;CHECK(ds.listData("time_depth",wellId,timeDepths,err)&&timeDepths.size()==1);
+    winQ.timeDepthBindings={{wellId,timeDepths.front().id}};
     SeismicHorizonWindowResult winRes;
     CHECK(ds.readSeismicHorizonWindow(winQ, winRes, err));
     CHECK(winRes.validTraceCount == 4);
@@ -451,11 +524,211 @@ static void seismicStratigraphyAndQueryApis()
     CHECK(std::isfinite(winRes.traces[0].rmsAmplitude) && winRes.traces[0].rmsAmplitude > 0.0f);
 }
 
+static void strictSelectionAndBudgets()
+{
+    QTemporaryDir temp;CHECK(temp.isValid());std::string error;DataService ds;
+    CHECK(ds.createProject(temp.filePath("model").toUtf8().toStdString(),"strict queries",error));
+    const auto source=temp.filePath("synthetic.txt");const QByteArray bytes="strict-stratigraphy-fixture";
+    {QFile file(source);CHECK(file.open(QIODevice::WriteOnly));CHECK(file.write(bytes)==bytes.size());}
+    ParsedFile parsed;parsed.kind="test";parsed.status="parsed";WellDataset well;well.wellInfo.wellName="A";
+    well.wellInfo.wellheadX=500000;well.wellInfo.wellheadY=4000000;well.wellInfo.coordinateSystem="EPSG:32650";well.wellInfo.coordinateUnit="m";
+    well.defaultDepthInfo.depthType="MD";well.defaultDepthInfo.depthUnit="m";well.defaultDepthInfo.mdReference="KB";
+    TimeDepthTable td;td.relationName="checks";td.depthInfo=well.defaultDepthInfo;td.timeUnit="ms";td.timeType="TWT";td.timeReference="fixture";
+    td.depthTimePairs={{100,0,500000,4000000},{200,16,500000,4000000}};well.timeDepthRelations.push_back(td);
+    LogSet logs;logs.logSetName="logs";logs.depthInfo=well.defaultDepthInfo;logs.samplingAxis.depthValues={100,150,200};
+    LogCurve curve;curve.curveName="GR";curve.curveUnit="API";curve.sampleValues={10,20,30};logs.logCurves.push_back(curve);well.wellbore.logSets.push_back(logs);
+    auto bareDepth=well.defaultDepthInfo;bareDepth.mdReference.clear();auto bareLogs=logs;bareLogs.logSetName="bare-md-logs";bareLogs.depthInfo=bareDepth;
+    well.wellbore.logSets.push_back(bareLogs);
+    const auto track=[&](const std::string& name,const std::string& unit,DepthInfo depth,double top,double bottom) {
+        IntervalTrack result;result.trackName=name;result.trackType="stratigraphy";result.depthInfo=depth;
+        GeologicalInterval interval;interval.intervalName=unit;interval.topDepth=top;interval.bottomDepth=bottom;result.intervals.push_back(interval);
+        return result;
+    };
+    well.wellbore.intervalTracks.push_back(track("地震小层","USER",well.defaultDepthInfo,100,150));
+    well.wellbore.intervalTracks.push_back(track("ordinary","T1-T2-S1",well.defaultDepthInfo,100,200));
+    well.wellbore.intervalTracks.push_back(track("bare-md","BARE",bareDepth,100,200));
+    well.wellbore.intervalTracks.push_back(track("unknown","UNKNOWN",{},100,200));
+    auto feet=well.defaultDepthInfo;feet.depthUnit="ft";well.wellbore.intervalTracks.push_back(track("feet","FEET",feet,100,200));
+    auto tvd=well.defaultDepthInfo;tvd.depthType="TVD";tvd.tvdReference="KB";well.wellbore.intervalTracks.push_back(track("tvd","TVD",tvd,100,200));
+    auto other=well.defaultDepthInfo;other.mdReference="OTHER";well.wellbore.intervalTracks.push_back(track("other","OTHER",other,100,200));
+    well.wellbore.intervalTracks.push_back(track("duplicate","DUP",well.defaultDepthInfo,100,150));
+    well.wellbore.intervalTracks.push_back(track("duplicate","DUP",well.defaultDepthInfo,150,200));
+    auto repeated=track("repeated","REPEAT",well.defaultDepthInfo,100,125);
+    repeated.intervals.push_back(repeated.intervals.front());repeated.intervals.back().topDepth=150;repeated.intervals.back().bottomDepth=175;
+    well.wellbore.intervalTracks.push_back(repeated);
+    auto auxOrder=track("aux-order","LOWER",well.defaultDepthInfo,150,175);
+    auxOrder.intervals.push_back(auxOrder.intervals.front());auxOrder.intervals.back().intervalName="UPPER";
+    auxOrder.intervals.back().topDepth=100;auxOrder.intervals.back().bottomDepth=125;
+    well.wellbore.intervalTracks.push_back(auxOrder);parsed.wells.push_back(well);
+    for(int i=0;i<2;++i){SeismicHorizon h;h.horizonName=i==0?"T1":"T2";h.coordinateSystem="EPSG:32650";h.coordinateUnit="m";
+        h.timeUnit="ms";h.timeType="TWT";h.timeReference="fixture";h.points.push_back({100,200,500000,4000000,double(2+i*4)});parsed.horizons.push_back(h);}
+    long long sourceId=0;
+    const bool imported=ds.importPreparedFile(source.toUtf8().toStdString(),source.toUtf8().toStdString(),source.toUtf8().toStdString(),
+        QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex().toStdString(),parsed,sourceId,error);
+    CHECK(imported);if(!imported){std::cerr<<error<<'\n';return;}
+    std::vector<WellSummary> wells;CHECK(ds.listWells(wells,error)&&wells.size()==1);if(wells.empty())return;const auto wellId=wells.front().id;
+    std::vector<DataEntry> before;CHECK(ds.listData("intervals",wellId,before,error));
+    SeismicStratigraphyBuildOptions options;options.schemeId="scheme-A";SeismicStratigraphyBuildReport a,b;
+    CHECK(ds.buildSeismicStratigraphicFramework(options,a,error));CHECK(a.matchedWellCount==1);
+    std::vector<DataEntry> afterA;CHECK(ds.listData("intervals",wellId,afterA,error));
+    for(const auto& original:before)CHECK(std::any_of(afterA.begin(),afterA.end(),[&](const auto& entry){return entry.id==original.id;}));
+    options.schemeId="scheme-B";CHECK(ds.buildSeismicStratigraphicFramework(options,b,error));
+    std::vector<DataEntry> afterB;CHECK(ds.listData("intervals",wellId,afterB,error));
+    for(const auto& original:afterA)CHECK(std::any_of(afterB.begin(),afterB.end(),[&](const auto& entry){return entry.id==original.id;}));
+    options.schemeId="scheme-A";SeismicStratigraphyBuildReport nextA;CHECK(ds.buildSeismicStratigraphicFramework(options,nextA,error));
+    CHECK(nextA.revision!=a.revision);std::vector<DataEntry> afterNext;CHECK(ds.listData("intervals",wellId,afterNext,error));
+    for(const auto& original:afterB)CHECK(std::any_of(afterNext.begin(),afterNext.end(),[&](const auto& entry){return entry.id==original.id;}));
+    StratigraphicScheme old;CHECK(ds.readStratigraphicScheme("scheme-A",a.revision.value,old,error));
+    const auto faultConnection="stratigraphy_fault_"+QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {
+        auto faultDb=QSqlDatabase::addDatabase("QSQLITE",faultConnection);faultDb.setDatabaseName(temp.filePath("model/data.sqlite"));CHECK(faultDb.open());
+        QSqlQuery fault(faultDb);
+        CHECK(fault.exec("CREATE TRIGGER reject_framework_track BEFORE INSERT ON tracks WHEN NEW.source_id IS NULL BEGIN SELECT RAISE(ABORT,'injected materialization failure'); END"));
+        fault.finish();SeismicStratigraphyBuildReport failed;
+        CHECK(!ds.buildSeismicStratigraphicFramework(options,failed,error));CHECK(failed.schemeId.empty()&&failed.revision.empty());
+        StratigraphicScheme preserved;CHECK(ds.readStratigraphicScheme("scheme-A",{},preserved,error));CHECK(preserved.revision==nextA.revision);
+        std::vector<DataEntry> preservedTracks;CHECK(ds.listData("intervals",wellId,preservedTracks,error));CHECK(preservedTracks.size()==afterNext.size());
+        for(const auto& original:afterNext)CHECK(std::any_of(preservedTracks.begin(),preservedTracks.end(),[&](const auto& entry){return entry.id==original.id;}));
+        CHECK(fault.exec("DROP TRIGGER reject_framework_track"));
+    }
+    QSqlDatabase::removeDatabase(faultConnection);
+    // Independent source declarations must remain independent, including missing
+    // MD/time datums. A preferred second relation must never borrow the first's.
+    ParsedFile additional;additional.kind="test";additional.status="parsed";WellDataset tdWell;
+    tdWell.wellInfo=well.wellInfo;tdWell.defaultDepthInfo=well.defaultDepthInfo;
+    auto missingMd=td;missingMd.relationName="missing-md-reference";missingMd.depthInfo.mdReference.clear();
+    auto missingTime=td;missingTime.relationName="missing-time-reference";missingTime.timeReference.clear();
+    tdWell.timeDepthRelations={missingMd,missingTime};
+    tdWell.wellbore.intervalTracks.push_back(track("independent-auxiliary","AUX",well.defaultDepthInfo,100,200));
+    additional.wells.push_back(tdWell);
+    const auto tdSource=temp.filePath("independent-time-depth.txt");const QByteArray tdBytes="independent-time-depth-fixture";
+    {QFile file(tdSource);CHECK(file.open(QIODevice::WriteOnly));CHECK(file.write(tdBytes)==tdBytes.size());}
+    long long tdSourceId=0;CHECK(ds.importPreparedFile(tdSource.toUtf8().toStdString(),tdSource.toUtf8().toStdString(),tdSource.toUtf8().toStdString(),
+        QCryptographicHash::hash(tdBytes,QCryptographicHash::Sha256).toHex().toStdString(),additional,tdSourceId,error));
+    std::vector<DataEntry> tdEntries;CHECK(ds.listData("time_depth",wellId,tdEntries,error));
+    const auto relationId=[&](const std::string& name){const auto it=std::find_if(tdEntries.begin(),tdEntries.end(),[&](const auto& entry){return entry.name==name;});return it==tdEntries.end()?0LL:it->id;};
+    const auto prefer=[&](long long id){return ds.saveCorrelationTimeDepthPreferences({{wellId,id,"{\"basis\":\"explicit fixture selection\"}"}},error);};
+    CHECK(relationId("checks")>0&&relationId("missing-md-reference")>0&&relationId("missing-time-reference")>0);
+    CHECK(prefer(relationId("checks")));
+    std::vector<WellStratigraphicLogSlice> results;
+    WellIntervalLogQuery query;query.wellIds={wellId};query.includeAuxiliaryIntervals=false;
+    query.stratigraphy.source=StratigraphicTrackSource::WellIntervalTrack;query.stratigraphy.trackName="ordinary";query.stratigraphy.unitName="T1-T2-S1";
+    query.stratigraphy.schemeId="scheme-A";query.stratigraphy.subIntervalId={"T1-T2-S1"};query.stratigraphy.intervalId={"T1-T2"};
+    CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.size()==1);
+    if(results.empty())return;CHECK(results.front().resolved&&near(results.front().topDepth,100)&&near(results.front().bottomDepth,200));
+    CHECK(results.front().featureTable.depths.size()==3);CHECK(results.front().trackId>0);
+    CHECK(near(results.front().topTimeMs,0)&&near(results.front().bottomTimeMs,16));
+    for(const auto* name:{"missing-md-reference","missing-time-reference"}) {
+        CHECK(prefer(relationId(name)));CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.front().resolved);
+        CHECK(results.front().featureTable.depths.size()==3&&std::isnan(results.front().topTimeMs)&&std::isnan(results.front().bottomTimeMs));
+    }
+    CHECK(prefer(relationId("checks")));
+    const auto ordinaryId=results.front().trackId;
+    query.stratigraphy.trackName="bare-md";query.stratigraphy.unitName="BARE";
+    CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.front().resolved&&results.front().featureTable.depths.size()==3);
+    CHECK(std::isnan(results.front().topTimeMs)&&std::isnan(results.front().bottomTimeMs));
+    query.stratigraphy.trackName="ordinary";query.stratigraphy.unitName="T1-T2-S1";
+    query.stratigraphy.source=StratigraphicTrackSource::SeismicFramework;query.stratigraphy.revision="missing-revision";
+    CHECK(!ds.queryWellLogsByStratigraphy(query,results,error));CHECK(results.empty());
+    query.stratigraphy.revision=a.revision.value;
+    const auto* actualSub=fw::resolveSubInterval(old,"T1-T2-S1");CHECK(actualSub);if(!actualSub)return;
+    const auto subDisplay=fw::displayName(old,actualSub->id),parentDisplay=fw::displayName(old,actualSub->interval);
+    CHECK(subDisplay!=actualSub->id.value&&parentDisplay!=actualSub->interval.value);
+    query.stratigraphy.subIntervalId={subDisplay};
+    CHECK(!ds.queryWellLogsByStratigraphy(query,results,error)&&results.empty()); // a different display form is not a typed ID.
+    query.stratigraphy.subIntervalId={"missing-subinterval"};query.stratigraphy.intervalId=actualSub->interval;
+    CHECK(!ds.queryWellLogsByStratigraphy(query,results,error)&&results.empty()); // no invalid-sub -> valid-parent fallback.
+    query.stratigraphy.subIntervalId=actualSub->id;query.stratigraphy.intervalId={"conflicting-parent"};
+    CHECK(!ds.queryWellLogsByStratigraphy(query,results,error)&&results.empty());
+    query.stratigraphy.subIntervalId={};query.stratigraphy.intervalId={parentDisplay};
+    CHECK(!ds.queryWellLogsByStratigraphy(query,results,error)&&results.empty());
+    query.stratigraphy.subIntervalId=actualSub->id;query.stratigraphy.intervalId=actualSub->interval;
+    CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.size()==1);
+    CHECK(results.front().resolved&&near(results.front().topDepth,112.5)&&near(results.front().bottomDepth,118.75));CHECK(results.front().schemeRevision==a.revision.value);
+    query.stratigraphy.subIntervalId={};query.stratigraphy.intervalId={};
+    CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.front().resolved); // unambiguous display-name compatibility.
+    StratigraphicScheme ambiguous;ambiguous.id="scheme-label-ambiguity";
+    for(const auto& [name,order]:{std::pair{"A",1},std::pair{"B-C",2},std::pair{"A-B",3},std::pair{"C",4}}) {
+        StratigraphicBoundary boundary;boundary.name=name;boundary.order=order;ambiguous.boundaries.push_back(boundary);
+    }
+    StratigraphicScheme committedAmbiguous;std::vector<FrameworkIssue> ambiguityIssues;
+    CHECK(ds.commitStratigraphicScheme(ambiguous,{},committedAmbiguous,ambiguityIssues,error));
+    query.stratigraphy.schemeId=ambiguous.id;query.stratigraphy.revision=committedAmbiguous.revision.value;query.stratigraphy.unitName="A-B-C";
+    CHECK(!ds.queryWellLogsByStratigraphy(query,results,error)&&results.empty());
+    query.stratigraphy.schemeId="scheme-A";
+    query.stratigraphy.source=StratigraphicTrackSource::WellIntervalTrack;query.stratigraphy.revision.clear();
+    for(auto names:{std::pair{"unknown","UNKNOWN"},std::pair{"feet","FEET"},std::pair{"tvd","TVD"},std::pair{"other","OTHER"},std::pair{"duplicate","DUP"}}) {
+        query.stratigraphy.trackName=names.first;query.stratigraphy.unitName=names.second;
+        CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.size()==1);CHECK(!results.front().resolved);CHECK(results.front().featureTable.depths.empty());
+        if(std::string(names.first)=="unknown")CHECK(results.front().depthType.empty()&&results.front().depthUnit.empty());
+    }
+    const auto duplicate=std::find_if(before.begin(),before.end(),[](const auto& entry){return entry.name=="duplicate";});CHECK(duplicate!=before.end());if(duplicate==before.end())return;
+    query.stratigraphy.trackId=duplicate->id;query.stratigraphy.trackName="renamed-display";
+    CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.front().resolved);CHECK(results.front().trackId==duplicate->id);
+    query.stratigraphy.trackId=0;query.stratigraphy.trackName="repeated";query.stratigraphy.unitName="REPEAT";
+    CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&!results.front().resolved);
+    const auto repeatedEntry=std::find_if(before.begin(),before.end(),[](const auto& entry){return entry.name=="repeated";});CHECK(repeatedEntry!=before.end());if(repeatedEntry==before.end())return;
+    std::vector<IntervalRecord> records;CHECK(ds.readIntervals(repeatedEntry->id,Missing,Missing,records,error)&&records.size()==2);if(records.empty())return;
+    query.stratigraphy.intervalRecordId=records.front().id;query.stratigraphy.unitName.clear();
+    CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.front().resolved);CHECK(near(results.front().bottomDepth,125));
+    query.stratigraphy.intervalRecordId=0;query.stratigraphy.trackId=ordinaryId;query.stratigraphy.unitName="T1-T2-S1";
+    query.resampleStepMeters=1e-300;CHECK(!ds.queryWellLogsByStratigraphy(query,results,error));CHECK(results.empty());
+    query.resampleStepMeters=0;query.normalizedSampleCount=std::numeric_limits<int>::max();CHECK(!ds.queryWellLogsByStratigraphy(query,results,error));CHECK(results.empty());
+    query.normalizedSampleCount=0;query.maxValues=2;CHECK(!ds.queryWellLogsByStratigraphy(query,results,error));CHECK(results.empty());
+    query.maxValues=8000000;query.resampleStepMeters=1;query.maxSamplesPerWell=2;CHECK(!ds.queryWellLogsByStratigraphy(query,results,error));CHECK(results.empty());
+    query.resampleStepMeters=25;query.maxSamplesPerWell=100;query.normalizedSampleCount=4;query.maxValues=12;
+    CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.front().resolved);
+    CHECK((results.front().featureTable.depths==std::vector<double>{100,125,150,175,200}));CHECK(results.front().normalizedFeatureTable.depths.size()==4);
+    CHECK(results.front().normalizedFeatureTable.depthUnit=="1");
+    query.maxValues=11;CHECK(!ds.queryWellLogsByStratigraphy(query,results,error));CHECK(results.empty());
+    query.maxValues=8000000;int cancellationChecks=0;query.cancelled=[&]{return ++cancellationChecks>1;};
+    CHECK(!ds.queryWellLogsByStratigraphy(query,results,error));CHECK(results.empty());query.cancelled={};
+    query.resampleStepMeters=0;query.normalizedSampleCount=0;query.includeAuxiliaryIntervals=true;
+    CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.front().resolved);
+    std::vector<long long> auxiliaryIds;for(const auto& group:results.front().auxiliaryTracks)auxiliaryIds.push_back(group.trackId);
+    CHECK(!auxiliaryIds.empty()&&std::is_sorted(auxiliaryIds.begin(),auxiliaryIds.end()));
+    std::vector<IntervalTrackResult> expectedAuxiliary;CHECK(ds.compareIntervals(auxiliaryIds,100,200,expectedAuxiliary,error));
+    CHECK(expectedAuxiliary.size()==results.front().auxiliaryTracks.size());
+    for(size_t i=0;i<expectedAuxiliary.size()&&i<results.front().auxiliaryTracks.size();++i) {
+        const auto& expected=expectedAuxiliary[i];const auto& actual=results.front().auxiliaryTracks[i];
+        CHECK(expected.name==actual.name&&expected.trackId==actual.trackId&&expected.wellId==actual.wellId);
+        CHECK(expected.intervals.size()==actual.intervals.size());
+        for(size_t j=0;j<expected.intervals.size()&&j<actual.intervals.size();++j) {
+            CHECK(expected.intervals[j].id==actual.intervals[j].id&&expected.intervals[j].value.intervalName==actual.intervals[j].value.intervalName);
+        }
+    }
+    query.maxAuxiliaryTracks=1;CHECK(!ds.queryWellLogsByStratigraphy(query,results,error)&&results.empty());query.maxAuxiliaryTracks=64;
+    query.maxAuxiliaryRecords=1;CHECK(!ds.queryWellLogsByStratigraphy(query,results,error)&&results.empty());query.maxAuxiliaryRecords=100000;
+    query.maxAuxiliaryBytes=1;CHECK(!ds.queryWellLogsByStratigraphy(query,results,error)&&results.empty());query.maxAuxiliaryBytes=16777216;
+    const auto metadataConnection="stratigraphy_metadata_"+QUuid::createUuid().toString(QUuid::WithoutBraces);
+    {
+        auto metadataDb=QSqlDatabase::addDatabase("QSQLITE",metadataConnection);metadataDb.setDatabaseName(temp.filePath("model/data.sqlite"));CHECK(metadataDb.open());
+        QSqlQuery metadata(metadataDb);CHECK(metadata.prepare("SELECT options FROM sources WHERE id=?"));metadata.addBindValue(tdSourceId);CHECK(metadata.exec()&&metadata.next());
+        const auto originalOptions=metadata.value(0);metadata.finish();
+        CHECK(metadata.prepare("UPDATE sources SET options=? WHERE id=?"));
+        metadata.addBindValue(QString("{\"padding\":\"")+QString(262144,'x')+"\"}");metadata.addBindValue(tdSourceId);CHECK(metadata.exec());metadata.finish();
+        query.maxAuxiliaryBytes=131072;
+        CHECK(!ds.queryWellLogsByStratigraphy(query,results,error)&&results.empty()&&error.find("辅助分层")!=std::string::npos);
+        CHECK(metadata.prepare("UPDATE sources SET options=? WHERE id=?"));metadata.addBindValue(originalOptions);metadata.addBindValue(tdSourceId);CHECK(metadata.exec());metadata.finish();
+        query.maxAuxiliaryBytes=16777216;
+    }
+    QSqlDatabase::removeDatabase(metadataConnection);
+    query.curveNames={"NO-MATCH"};cancellationChecks=0;query.cancelled=[&]{return ++cancellationChecks==4;};
+    CHECK(!ds.queryWellLogsByStratigraphy(query,results,error)&&results.empty()&&cancellationChecks==4);query.cancelled={};query.curveNames.clear();
+    query.includeAuxiliaryIntervals=false;
+    CHECK(ds.verifySource(sourceId,error));ds.closeProject();CHECK(ds.openProjectReadOnly(temp.filePath("model").toUtf8().toStdString(),error));
+    query.resampleStepMeters=0;query.normalizedSampleCount=0;
+    CHECK(ds.queryWellLogsByStratigraphy(query,results,error)&&results.front().resolved&&results.front().trackId==ordinaryId);
+    QFile file(source);CHECK(file.open(QIODevice::ReadOnly)&&file.readAll()==bytes);
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     pureModel(); seismicMask(); persistence(); legacyProjectWithoutFramework();
+    consumerScopedInvalidation();
     seismicStratigraphyAndQueryApis();
+    strictSelectionAndBudgets();
     if (failures) { std::cerr << failures << " failures\n"; return 1; }
     std::cout << "stratigraphic_framework_tests passed\n";
     return 0;

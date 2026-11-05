@@ -278,10 +278,10 @@ bool DataService::readSeismicTimeSlice(long long volumeId,double timeMs,const Ti
         return timeSliceFromReader(reader,timeMs,options,result,error,cancel,tileReady);
     }catch(const std::exception& e){return reject(error,std::string("原生时间切片读取失败：")+e.what());}
 }
-bool DataService::readSeismicFileTimeSlice(const std::string& path,double timeMs,const TimeSliceReadOptions& options,SeismicTimeSliceResult& result,std::string& error,const CancelCheck& cancel){
+bool DataService::readSeismicFileTimeSlice(const std::string& path,double timeMs,const TimeSliceReadOptions& options,SeismicTimeSliceResult& result,std::string& error,const CancelCheck& cancel,const TimeSliceTileCallback& tileReady){
     result={};error.clear();try{if(stopped(cancel,error))return false;
         segy_detail::Reader reader;if(!reader.open(path,error,cancel))return false;
-        return timeSliceFromReader(reader,timeMs,options,result,error,cancel,{});
+        return timeSliceFromReader(reader,timeMs,options,result,error,cancel,tileReady);
     }catch(const std::exception& e){return reject(error,std::string("原生时间切片读取失败：")+e.what());}
 }
 void DataService::clearSeismicSliceCache(){segy_detail::clearSliceCache();}

@@ -3,8 +3,11 @@
 #include "paleo_data/service.h"
 #include "store/interpretation_store.h"
 #include <QJsonDocument>
+#include <algorithm>
 #include <cmath>
 #include <set>
+#include <map>
+#include <tuple>
 
 namespace paleo::data {
 using namespace detail;
@@ -12,6 +15,21 @@ namespace ix = detail::interpretation;
 namespace fw = framework;
 namespace {
 constexpr int FrameworkSchema = 1;
+// A scheme can be committed alone or inside the builder's publication
+// transaction. Releasing an inner savepoint must not commit the outer write.
+class SchemeSavepoint {
+    ProjectStore& store;
+    QString name;
+public:
+    bool active;
+    SchemeSavepoint(ProjectStore& value,std::string& error)
+        :store(value),name(QStringLiteral("\"paleo_strat_%1\"").arg(ix::newId())),
+         active(store.exec("SAVEPOINT "+name,{},error)) {}
+    ~SchemeSavepoint(){if(active){std::string ignored;store.exec("ROLLBACK TO "+name,{},ignored);store.exec("RELEASE "+name,{},ignored);}}
+    bool commit(std::string& error){if(!active || !store.exec("RELEASE "+name,{},error))return false;active=false;return true;}
+    SchemeSavepoint(const SchemeSavepoint&)=delete;
+    SchemeSavepoint& operator=(const SchemeSavepoint&)=delete;
+};
 QJsonValue num(double v) { return std::isfinite(v) ? QJsonValue(v) : QJsonValue(QJsonValue::Null); }
 double real(const QJsonValue& v) { return v.isDouble() ? v.toDouble() : Missing; }
 
@@ -31,6 +49,7 @@ bool ensureSchema(ProjectStore& st, std::string& error)
         // 子层段成果：原始解释成果资产保持不变，这里只登记归属与状态
         "CREATE TABLE IF NOT EXISTS strat_result_bindings(id TEXT PRIMARY KEY,kind TEXT NOT NULL,scheme_id TEXT NOT NULL REFERENCES strat_schemes(id),scheme_revision TEXT NOT NULL REFERENCES strat_scheme_revisions(revision),sub_interval_id TEXT NOT NULL,interval_id TEXT NOT NULL,aggregate INTEGER NOT NULL,well_id INTEGER NOT NULL,asset_ref TEXT NOT NULL,input_fingerprint TEXT NOT NULL,legacy_label TEXT NOT NULL,status TEXT NOT NULL,created TEXT NOT NULL,detail TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS strat_result_sub ON strat_result_bindings(scheme_id,sub_interval_id)",
+        "CREATE INDEX IF NOT EXISTS strat_result_state ON strat_result_bindings(scheme_id,status)",
         "INSERT OR REPLACE INTO ds_meta(key,value) VALUES('stratigraphic_framework_schema','1')"};
     for (const auto& s : sql) if (!st.exec(s, {}, error)) return false;
     return true;
@@ -154,19 +173,31 @@ bool listBindings(const ProjectStore& st, const std::string& schemeId, const Sub
     while (r.next()) out.push_back(bindingFrom(r));
     return true;
 }
-bool affected(const SubIntervalResultBinding& b, const std::set<std::string>& subs, const std::set<std::string>& intervals)
+bool affected(const SubIntervalResultBinding& b, const StratigraphicScheme& before, const StratigraphicScheme& after)
 {
     if (b.status == "legacy_unresolved") return false;
-    if (!b.subInterval.empty()) return subs.count(b.subInterval.value) > 0;
-    return b.aggregate && intervals.count(b.interval.value) > 0; // 父单元综合成果：任一组成子层段变化即受影响
+    return fw::resultGeometryFingerprint(before,b)!=fw::resultGeometryFingerprint(after,b);
 }
-void impactSets(const StratigraphicScheme& before, const StratigraphicScheme& after, std::set<std::string>& subs, std::set<std::string>& intervals)
+bool invalidateAffected(ProjectStore& st,const StratigraphicScheme& before,const StratigraphicScheme& after,std::string& error)
 {
-    for (const auto& id : fw::impactedSubIntervals(before, after)) {
-        subs.insert(id.value);
-        if (const auto* x = fw::findSubInterval(after, id)) intervals.insert(x->interval.value);
-        if (const auto* x = fw::findSubInterval(before, id)) intervals.insert(x->interval.value);
+    QSqlQuery rows;
+    if(!st.exec("SELECT id,kind,sub_interval_id,interval_id,aggregate,well_id FROM strat_result_bindings "
+                "WHERE scheme_id=? AND status IN ('current','candidate','review_required')",
+                {q(after.id)},error,&rows))return false;
+    using Key=std::tuple<std::string,std::string,std::string,bool,long long>;
+    std::map<Key,bool> changes;std::vector<std::string> ids;
+    while(rows.next()) {
+        SubIntervalResultBinding binding;binding.id=s(rows.value(0).toString());binding.kind=s(rows.value(1).toString());
+        binding.subInterval.value=s(rows.value(2).toString());binding.interval.value=s(rows.value(3).toString());
+        binding.aggregate=rows.value(4).toBool();binding.wellId=rows.value(5).toLongLong();
+        const Key key{binding.kind,binding.subInterval.value,binding.interval.value,binding.aggregate,binding.wellId};
+        auto found=changes.find(key);
+        if(found==changes.end())found=changes.emplace(key,affected(binding,before,after)).first;
+        if(found->second)ids.push_back(binding.id);
     }
+    rows.finish();
+    for(const auto& id:ids)if(!st.exec("UPDATE strat_result_bindings SET status='stale' WHERE id=?",{q(id)},error))return false;
+    return true;
 }
 bool commitInternal(ProjectStore& st, StratigraphicScheme scheme, const std::string& expected, StratigraphicScheme& committed,
                     std::vector<FrameworkIssue>& issues, std::string& error)
@@ -176,7 +207,7 @@ bool commitInternal(ProjectStore& st, StratigraphicScheme scheme, const std::str
     fw::deriveUnits(scheme);
     issues = fw::validate(scheme);
     if (fw::hasErrors(issues)) { error = "层段方案校验失败：" + issues.front().message; for (auto& i : issues) if (i.severity == "error") { error = "层段方案校验失败：" + i.message; break; } return false; }
-    Transaction tx(st, error);
+    SchemeSavepoint tx(st, error);
     if (!tx.active || !ensureSchema(st, error)) return false;
     std::string project;
     if (!ix::projectId(st, project, error)) return false;
@@ -200,16 +231,7 @@ bool commitInternal(ProjectStore& st, StratigraphicScheme scheme, const std::str
     else if (!st.exec("INSERT INTO strat_schemes(id,name,head_revision,created) VALUES(?,?,?,?)", {q(scheme.id), q(scheme.name), idq(scheme.revision), q(scheme.created)}, error)) return false;
     if (!st.exec("INSERT INTO strat_scheme_revisions(revision,scheme_id,parent_revision,created,author,note,payload,digest) VALUES(?,?,?,?,?,?,?,?)",
                  {idq(scheme.revision), q(scheme.id), q(head), q(scheme.created), q(scheme.author), q(scheme.note), payload, ix::digest(payload)}, error)) return false;
-    if (existing) {
-        std::set<std::string> subs, intervals;
-        impactSets(before, scheme, subs, intervals);
-        std::vector<SubIntervalResultBinding> bindings;
-        if (!listBindings(st, scheme.id, {}, bindings, error)) return false;
-        for (const auto& b : bindings) {
-            if (b.status != "current" || !affected(b, subs, intervals)) continue;
-            if (!st.exec("UPDATE strat_result_bindings SET status='stale' WHERE id=?", {q(b.id)}, error)) return false;
-        }
-    }
+    if (existing && !invalidateAffected(st,before,scheme,error))return false;
     if (!tx.commit(error)) return false;
     committed = scheme;
     return true;
@@ -336,11 +358,12 @@ bool DataService::previewStratigraphicImpact(const StratigraphicScheme& candidat
     if (!readRevision(impl_->store, candidate.id, {}, before, error)) return false;
     fw::deriveUnits(after);
     subIntervals = fw::impactedSubIntervals(before, after);
-    std::set<std::string> subs, intervals;
-    impactSets(before, after, subs, intervals);
+    for(const auto& sub:before.subIntervals)
+        if(fw::seismicSubIntervalFingerprint(before,sub.id)!=fw::seismicSubIntervalFingerprint(after,sub.id) &&
+           std::find(subIntervals.begin(),subIntervals.end(),sub.id)==subIntervals.end())subIntervals.push_back(sub.id);
     std::vector<SubIntervalResultBinding> all;
     if (!listBindings(impl_->store, candidate.id, {}, all, error)) return false;
-    for (const auto& b : all) if (b.status == "current" && affected(b, subs, intervals)) affectedResults.push_back(b);
+    for (const auto& b : all) if ((b.status=="current"||b.status=="candidate"||b.status=="review_required") && affected(b,before,after)) affectedResults.push_back(b);
     return true;
 }
 }

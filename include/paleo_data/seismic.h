@@ -110,12 +110,12 @@ struct SeismicStatistics {
 
 // 地震层位/小层定位器：支持按四等分小层（T70-T72-S1..S4）、父层位（T70-T72）或直接指定顶底层位资源 ID。
 struct SeismicStratigraphicTarget {
-    std::string schemeId = "default";
+    std::string schemeId;          // 空可尝试默认方案；显式方案/修订或强类型 ID 解析失败即报错，不回退。
     std::string revision;          // 空表示读取当前头修订
-    SubIntervalId subIntervalId;   // 优先：四等分小层 ID（如 "T70-T72-S1"）
-    IntervalId intervalId;         // 备选：父层位单元 ID（如 "T70-T72"）
+    SubIntervalId subIntervalId;   // 精确小层 ID；可读名称填 unitName，不将显示名当作 ID。
+    IntervalId intervalId;         // 精确父单元 ID；与 subIntervalId 同传时必须一致。
     std::string unitName;          // 可读名称（如 "T70-T72-S1" 或 "T70-T72"）
-    long long topHorizonId = 0;    // 可选兜底：直接指定顶/底地震层位资源 ID
+    long long topHorizonId = 0;    // 直接指定顶/底资源；与显式方案共用时须匹配该修订的关联。
     long long bottomHorizonId = 0;
     int subIndex = 0;              // 0=整层段；1..4=四等分中的第 k 个小层
 };
@@ -136,6 +136,10 @@ enum class HorizonSpatialDomainKind {
     ArbitraryTraceList,    // 指定的一组 (inline, crossline) 道列表（explicitTraces）
     ArbitraryXYPath        // 任意折线/井间连线 XY 路径（xyPoints）
 };
+
+// Explicit project-scoped selection for depth conversion. No display-name or
+// minimum-ID fallback is used when a well has no selected relation.
+struct SeismicTimeDepthBinding { long long wellId = 0, timeDepthId = 0; };
 
 struct SeismicHorizonWindowQuery {
     std::string undeclaredTimeUnit, undeclaredTimeType; // explicit convention for undeclared sources only
@@ -158,6 +162,10 @@ struct SeismicHorizonWindowQuery {
     bool computeWindowAttributes = true;     // 同步计算每道在该小层内的 RMS/均幅/峰值/能量属性
     bool computeDepthRange = true;           // 利用工区时深关系换算每道 [topDepthM, bottomDepthM]
     long long maxValues = 32000000;          // 样点预算上限
+    // Empty uses persisted time-depth preferences. Missing/invalid physical
+    // declarations keep depths unavailable; amplitude extraction can still work.
+    std::vector<SeismicTimeDepthBinding> timeDepthBindings;
+    long long maxDepthEvaluations = 8000000; // 两界逐井 IDW 求值总预算，1..64000000；不截断已选关系。未请求深度时忽略。
 };
 
 // 单道在该小层/层位下的实际变时深窗口元数据：
@@ -193,6 +201,8 @@ struct TraceHorizonWindowMeta {
 
     // 1=有效小层窗口，0=缺道，2=层位缺失/尖灭/倒置待复核
     std::uint8_t status = 0;
+    // 0=not requested, 1=both depth bounds resolved, 2=unavailable/review.
+    std::uint8_t depthStatus = 0;
 };
 
 struct SeismicHorizonWindowResult {
@@ -222,6 +232,10 @@ struct SeismicHorizonWindowResult {
     std::size_t validTraceCount = 0;
     std::size_t reviewTraceCount = 0;
     SeismicReadStatistics statistics;
+    std::string depthStatus = "not_requested"; // available / partial / unavailable
+    std::string depthType, depthReference;     // Converted values use confirmed MD/m.
+    std::vector<SeismicTimeDepthBinding> usedTimeDepthBindings;
+    std::vector<std::string> depthWarnings;   // Bounded diagnostics; no fabricated depths.
 };
 
 }

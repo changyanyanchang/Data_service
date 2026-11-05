@@ -6,6 +6,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QFileInfo>
 #include <QSqlError>
 #include <algorithm>
 #include <cmath>
@@ -43,6 +44,8 @@ struct WellTdCurve {
     double wellheadX = Missing;
     double wellheadY = Missing;
     std::vector<NormalizedTdPoint> points; // 按 md 严格递增排序
+    DepthInfo depthInfo;
+    std::string timeReference;
 };
 
 bool isFinite(double v) { return std::isfinite(v); }
@@ -254,7 +257,8 @@ NormalizedTdPoint normalizeRawPoint(const TimeDepthPoint& raw, double depthScale
 
 bool extractWellTdCurve(const DataService& ds, const ProjectStore& st, long long wellId,
                         const std::string& wellName, double wellheadX, double wellheadY,
-                        long long preferredTdId, bool autoDetectSign, WellTdCurve& out)
+                        long long preferredTdId, bool autoDetectSign, WellTdCurve& out,
+                        bool strictSemantics = false)
 {
     out = {};
     out.wellId = wellId;
@@ -264,14 +268,18 @@ bool extractWellTdCurve(const DataService& ds, const ProjectStore& st, long long
 
     std::string err;
     QSqlQuery qTd;
-    if (!st.exec("SELECT id FROM well_objects WHERE well_id=? AND kind='time_depth' ORDER BY id",
-                 {wellId}, err, &qTd))
+    QString candidateSql="SELECT id FROM well_objects WHERE well_id=? AND kind='time_depth'";
+    QVariantList candidateArgs{wellId};
+    if(strictSemantics && preferredTdId) {candidateSql+=" AND id=?";candidateArgs.push_back(preferredTdId);}
+    candidateSql+=" ORDER BY id";
+    if(strictSemantics)candidateSql+=" LIMIT 2";
+    if (!st.exec(candidateSql,candidateArgs, err, &qTd))
         return false;
     std::vector<long long> candidateIds;
     while (qTd.next()) candidateIds.push_back(qTd.value(0).toLongLong());
 
     // 若该井名下暂无已归井时深表，检查未归井时深表是否按井名匹配
-    if (candidateIds.empty() && !wellName.empty()) {
+    if (!strictSemantics && candidateIds.empty() && !wellName.empty()) {
         QSqlQuery qUnassigned;
         if (st.exec("SELECT id, name FROM well_objects WHERE (well_id IS NULL OR well_id<=0) AND kind='time_depth' ORDER BY id",
                     {}, err, &qUnassigned)) {
@@ -283,13 +291,21 @@ bool extractWellTdCurve(const DataService& ds, const ProjectStore& st, long long
         }
     }
     if (candidateIds.empty()) return false;
+    if (strictSemantics && ((!preferredTdId && candidateIds.size()!=1) ||
+        (preferredTdId && std::find(candidateIds.begin(),candidateIds.end(),preferredTdId)==candidateIds.end()))) return false;
 
     // 优先使用首选时深表，否则选择有效点最多的时深表
     TimeDepthTable bestTable;
     size_t bestValidCount = 0;
     for (long long tdId : candidateIds) {
+        if(strictSemantics && preferredTdId && tdId!=preferredTdId)continue;
         TimeDepthTable t;
         if (!ds.readTimeDepth(tdId, t, err)) continue;
+        if(strictSemantics && (t.depthInfo.depthType!="MD" ||
+            (t.depthInfo.depthUnit!="m" && t.depthInfo.depthUnit!="ft") ||
+            q(t.depthInfo.mdReference).trimmed().isEmpty() ||
+            (t.timeUnit!="ms" && t.timeUnit!="s") || (t.timeType!="TWT" && t.timeType!="OWT") ||
+            q(t.timeReference).trimmed().isEmpty() || (!t.timeSign.empty() && t.timeSign!="negated")))continue;
         size_t validCount = 0;
         for (const auto& p : t.depthTimePairs) {
             if (isFinite(p.depthValue) && isFinite(p.timeValue)) ++validCount;
@@ -305,6 +321,7 @@ bool extractWellTdCurve(const DataService& ds, const ProjectStore& st, long long
         }
     }
     if (bestValidCount < 2) return false;
+    out.depthInfo=bestTable.depthInfo;out.depthInfo.depthUnit="m";out.timeReference=bestTable.timeReference;
 
     const double depthScale = (bestTable.depthInfo.depthUnit == "ft" || bestTable.depthInfo.depthUnit == "FT") ? 0.3048 : 1.0;
     int negCount = 0, posCount = 0;
@@ -317,7 +334,7 @@ bool extractWellTdCurve(const DataService& ds, const ProjectStore& st, long long
     }
     // 识别时间单位（ms vs s）与正负号约定（Petrel 导出海拔以下常为负值）
     double timeScale = 1.0;
-    if (bestTable.timeUnit == "s" || bestTable.timeUnit == "S" || (bestTable.timeUnit.empty() && maxAbsTime > 0.0 && maxAbsTime <= 15.0))
+    if (bestTable.timeUnit == "s" || bestTable.timeUnit == "S" || (!strictSemantics && bestTable.timeUnit.empty() && maxAbsTime > 0.0 && maxAbsTime <= 15.0))
         timeScale = 1000.0;
     const bool negateTime = autoDetectSign && (negCount > posCount);
     const double owtFactor = (bestTable.timeType == "OWT" || bestTable.timeType == "owt") ? 2.0 : 1.0;
@@ -326,7 +343,7 @@ bool extractWellTdCurve(const DataService& ds, const ProjectStore& st, long long
     rawPts.reserve(bestTable.depthTimePairs.size());
     for (const auto& p : bestTable.depthTimePairs) {
         auto np = normalizeRawPoint(p, depthScale, timeScale * owtFactor, negateTime);
-        if (isFinite(np.md) && isFinite(np.twtMs) && np.md >= 0.0 && np.twtMs >= 0.0)
+        if (isFinite(np.md) && isFinite(np.twtMs) && np.md >= 0.0 && (strictSemantics || np.twtMs >= 0.0))
             rawPts.push_back(np);
     }
     if (rawPts.size() < 2) return false;
@@ -372,8 +389,13 @@ bool DataService::buildSeismicStratigraphicFramework(const SeismicStratigraphyBu
 {
     error.clear();
     report = {};
+    struct ResetFailedReport {
+        SeismicStratigraphyBuildReport& report;bool published=false;
+        ~ResetFailedReport(){if(!published)report={};}
+    } reportState{report};
     auto& st = impl_->store;
     if (!st.db.isOpen()) { error = "请先打开工区"; return false; }
+
     if (st.readOnly) { error = "只读工区不能构建或写入地震地层框架"; return false; }
 
     auto isCancelled = [&]() {
@@ -638,6 +660,8 @@ bool DataService::buildSeismicStratigraphicFramework(const SeismicStratigraphyBu
 
     StratigraphicScheme committed;
     std::vector<FrameworkIssue> issues;
+    Transaction publication(st,error);
+    if(!publication.active || isCancelled())return false;
     if (!commitStratigraphicScheme(scheme, expectedHead, committed, issues, error))
         return false;
 
@@ -651,30 +675,36 @@ bool DataService::buildSeismicStratigraphicFramework(const SeismicStratigraphyBu
 
     // 7. 在每口匹配井上落库 '地震层位'（T70-T72）与 '地震小层'（T70-T72-S1..S4）分层道及 '地震层位标志层'
     if (options.materializeWellTracks && !intervalsByWell.empty()) {
-        Transaction tx(st, error);
-        if (!tx.active) return false;
-
-        DepthInfo mdInfo;
-        mdInfo.depthType = "MD";
-        mdInfo.depthUnit = "m";
-        const QString depthText = json(depthJson(mdInfo));
-
         for (const auto& [wellId, ipicks] : intervalsByWell) {
             if (isCancelled()) return false;
-            if (options.overwriteExistingTracks) {
-                if (!st.exec("DELETE FROM tracks WHERE well_id=? AND name IN ('地震层位','地震小层')",
-                             {wellId}, error))
-                    return false;
-                if (!st.exec("DELETE FROM well_objects WHERE well_id=? AND kind='markers' AND name='地震层位标志层'",
-                             {wellId}, error))
-                    return false;
+            DepthInfo mdInfo;mdInfo.depthType="MD";mdInfo.depthUnit="m";
+            QSqlQuery wellDepth;
+            if(!st.exec("SELECT depth_json FROM wells WHERE id=?",{wellId},error,&wellDepth))return false;
+            if(wellDepth.next())mdInfo.mdReference=readDepth(object(wellDepth.value(0).toString())).mdReference;
+            wellDepth.finish();const QString depthText=json(depthJson(mdInfo));
+            // Published revisions and user edits retain their object IDs. Never
+            // identify generated ownership from a display name or legacy sheet.
+            const QJsonObject generated{{"generator","paleo.seismic_stratigraphy"},{"schema",1},
+                {"schemeId",q(committed.id)},{"schemeRevision",q(committed.revision.value)}};
+            const QString generatedSheet=json(generated);
+            QSqlQuery existing;
+            QString existingSql="SELECT 1 FROM tracks WHERE well_id=? AND source_id IS NULL AND ";
+            QVariantList existingArgs{wellId};
+            if(options.overwriteExistingTracks) {existingSql+="sheet=? LIMIT 1";existingArgs<<generatedSheet;}
+            else {
+                existingSql+="json_extract(CASE WHEN json_valid(sheet) THEN sheet ELSE '{}' END,'$.generator')=? "
+                             "AND json_extract(CASE WHEN json_valid(sheet) THEN sheet ELSE '{}' END,'$.schemeId')=? LIMIT 1";
+                existingArgs<<QStringLiteral("paleo.seismic_stratigraphy")<<q(committed.id);
             }
+            if(!st.exec(existingSql,existingArgs,error,&existing))return false;
+            const bool alreadyMaterialized=existing.next();existing.finish();
+            if(alreadyMaterialized)continue;
 
             // (a) 写入 '地震层位' 分层道（T70-T72 等）
             QSqlQuery qInsTrack;
             if (!st.exec("INSERT INTO tracks(well_id,source_id,name,type,depth_json,sheet) VALUES(?,NULL,?,?,?,?)",
                          {wellId, QStringLiteral("地震层位"), QStringLiteral("地震层位"),
-                          depthText, QStringLiteral("seismic_framework")},
+                          depthText, generatedSheet},
                          error, &qInsTrack))
                 return false;
             const long long horizonTrackId = qInsTrack.lastInsertId().toLongLong();
@@ -685,6 +715,7 @@ bool DataService::buildSeismicStratigraphicFramework(const SeismicStratigraphyBu
                     {"topTwtMs", "ms", ip.topTwtMs, ""},
                     {"bottomTwtMs", "ms", ip.bottomTwtMs, ""},
                     {"schemeId", "", Missing, committed.id},
+                    {"schemeRevision", "", Missing, committed.revision.value},
                     {"intervalId", "", Missing, ip.intervalId}
                 };
                 if (!st.exec("INSERT INTO intervals(track_id,ordinal,original_id,name,top,bottom,top_tvd,bottom_tvd,top_ss,bottom_ss,facies,top_unc,bottom_unc,not_penetrated,properties,source_row) "
@@ -701,7 +732,7 @@ bool DataService::buildSeismicStratigraphicFramework(const SeismicStratigraphyBu
             QSqlQuery qInsSubTrack;
             if (!st.exec("INSERT INTO tracks(well_id,source_id,name,type,depth_json,sheet) VALUES(?,NULL,?,?,?,?)",
                          {wellId, QStringLiteral("地震小层"), QStringLiteral("地震小层"),
-                          depthText, QStringLiteral("seismic_framework")},
+                          depthText, generatedSheet},
                          error, &qInsSubTrack))
                 return false;
             const long long subTrackId = qInsSubTrack.lastInsertId().toLongLong();
@@ -722,6 +753,7 @@ bool DataService::buildSeismicStratigraphicFramework(const SeismicStratigraphyBu
                         {"topTwtMs", "ms", sTopTwt, ""},
                         {"bottomTwtMs", "ms", sBotTwt, ""},
                         {"schemeId", "", Missing, committed.id},
+                        {"schemeRevision", "", Missing, committed.revision.value},
                         {"intervalId", "", Missing, ip.intervalId},
                         {"subIntervalId", "", Missing, subName},
                         {"subIndex", "", double(sIdx), std::to_string(sIdx)}
@@ -748,7 +780,7 @@ bool DataService::buildSeismicStratigraphicFramework(const SeismicStratigraphyBu
                         {"id", mId},
                         {"name", q(hp.horizonName)},
                         {"depth", hp.md},
-                        {"tvd", hp.md},
+                        {"tvd", QJsonValue::Null}, // MD alone does not establish TVD for a deviated well.
                         {"tvdss", QJsonValue::Null},
                         {"row", hp.order}
                     });
@@ -757,7 +789,8 @@ bool DataService::buildSeismicStratigraphicFramework(const SeismicStratigraphyBu
                 if (!markerPoints.isEmpty()) {
                     const QJsonObject payload{
                         {"depth", depthJson(mdInfo)},
-                        {"points", markerPoints}
+                        {"points", markerPoints},
+                        {"generated",generated}
                     };
                     if (!st.exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(?,NULL,'markers',?,?)",
                                  {wellId, QStringLiteral("地震层位标志层"), json(payload)}, error))
@@ -766,10 +799,9 @@ bool DataService::buildSeismicStratigraphicFramework(const SeismicStratigraphyBu
             }
         }
 
-        if (!tx.commit(error)) return false;
     }
-
-    return true;
+    if(isCancelled() || !publication.commit(error))return false;
+    reportState.published=true;return true;
 }
 
 bool DataService::listAvailableStratigraphicTracks(std::vector<StratigraphicTrackDescriptor>& tracks,
@@ -862,6 +894,54 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
     auto& st = impl_->store;
     if (!st.db.isOpen()) { error = "请先打开工区"; return false; }
 
+    if(query.maxValues<=0 || query.maxValues>64000000 || query.maxSamplesPerWell<=0 || query.maxSamplesPerWell>4000000 ||
+       query.normalizedSampleCount<0 || query.normalizedSampleCount>query.maxSamplesPerWell ||
+       query.maxAuxiliaryTracks<=0 || query.maxAuxiliaryTracks>4096 ||
+       query.maxAuxiliaryRecords<=0 || query.maxAuxiliaryRecords>1000000 ||
+       query.maxAuxiliaryBytes<=0 || query.maxAuxiliaryBytes>67108864 ||
+       !isFinite(query.resampleStepMeters) || query.wellIds.size()>65536 || query.curveNames.size()>64 ||
+       query.stratigraphy.trackId<0 || query.stratigraphy.intervalRecordId<0) {
+        error="地层曲线查询参数或采样预算无效";return false;
+    }
+    bool cancelledSeen=false;
+    const auto stopped=[&]{
+        if(cancelledSeen || (query.cancelled && query.cancelled())) {cancelledSeen=true;error="已取消地层曲线查询";return true;}return false;
+    };
+    if(stopped())return false;
+    if(!st.exec("BEGIN",{},error))return false;
+    struct ReadSnapshot {ProjectStore& store;~ReadSnapshot(){std::string ignored;store.exec("ROLLBACK",{},ignored);}} snapshot{st};
+    std::vector<WellStratigraphicLogSlice> pending;
+    long long usedValues=0;
+    long long auxiliaryTracks=0,auxiliaryRecords=0,auxiliaryBytes=0;
+    const auto chargeAuxiliaryBytes=[&](long long bytes) {
+        if(bytes<0 || bytes>query.maxAuxiliaryBytes-auxiliaryBytes) {
+            error="辅助分层元数据或记录超过字节预算";return false;
+        }
+        auxiliaryBytes+=bytes;return true;
+    };
+    const auto charge=[&](size_t rows,size_t columns) {
+        if(rows>size_t(query.maxSamplesPerWell) || columns>64 ||
+           (columns && rows>size_t((query.maxValues-usedValues)/static_cast<long long>(columns)))) {
+            error="地层曲线结果超过采样预算，请缩小井集、深度窗或曲线数";return false;
+        }
+        usedValues+=static_cast<long long>(rows)*static_cast<long long>(columns);return true;
+    };
+    const auto knownDepth=[&](const DepthInfo& d){
+        return (d.depthType=="MD"||d.depthType=="TVD"||d.depthType=="TVDSS") &&
+            (d.depthUnit=="m"||d.depthUnit=="ft") &&
+            (d.depthType!="MD"||!d.mdReference.empty()||query.stratigraphy.source==StratigraphicTrackSource::WellIntervalTrack) &&
+            (d.depthType!="TVD"||!d.tvdReference.empty()) &&
+            (d.depthType!="TVDSS"||!d.tvdssReference.empty()) &&
+            (d.depthType!="TVDSS"||d.tvdssDirection=="up"||d.tvdssDirection=="down");
+    };
+    const auto sameDepth=[&](const DepthInfo& a,const DepthInfo& b) {
+        if(!knownDepth(a)||!knownDepth(b)||a.depthType!=b.depthType||a.depthUnit!=b.depthUnit)return false;
+        if(a.depthType=="MD")return a.mdReference==b.mdReference;
+        if(a.depthType=="TVD")return a.tvdReference==b.tvdReference;
+        if(a.depthType=="TVDSS")return a.tvdssReference==b.tvdssReference && a.tvdssDirection==b.tvdssDirection;
+        return false;
+    };
+
     // 1. 确定目标井列表
     std::vector<WellInfoRecord> allWells;
     if (!listWellInfos(allWells, error)) return false;
@@ -873,36 +953,57 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
         targetWells.reserve(allWells.size());
         for (const auto& w : allWells) targetWells.push_back(w.id);
     }
+    if(targetWells.size()>65536){error="地层曲线查询井数超过预算";return false;}
 
-    // 2. 若选择地震地层体系（或传了 subIntervalId / intervalId），预加载 StratigraphicScheme
+    // Explicit source controls resolution. A fixed revision never falls back to
+    // another scheme or to current materialized rows with a similar name.
     const auto& sel = query.stratigraphy;
     StratigraphicScheme scheme;
     bool hasScheme = false;
     const std::string schemeId = sel.schemeId.empty() ? "default" : sel.schemeId;
-    if (sel.source == StratigraphicTrackSource::SeismicFramework ||
-        !sel.subIntervalId.empty() || !sel.intervalId.empty() ||
-        sel.trackName == "地震小层" || sel.trackName == "地震层位") {
-        std::string ignoreErr;
-        hasScheme = readStratigraphicScheme(schemeId, sel.revision, scheme, ignoreErr);
+    if(sel.source!=StratigraphicTrackSource::SeismicFramework && sel.source!=StratigraphicTrackSource::WellIntervalTrack) {
+        error="未知的分层来源类型";return false;
     }
+    if (sel.source == StratigraphicTrackSource::SeismicFramework)
+        if(!(hasScheme=readStratigraphicScheme(schemeId,sel.revision,scheme,error)))return false;
 
     const StratigraphicSubInterval* matchedSub = nullptr;
     const StratigraphicInterval* matchedIv = nullptr;
     if (hasScheme) {
-        if (!sel.subIntervalId.empty())
-            matchedSub = fw::resolveSubInterval(scheme, sel.subIntervalId.value);
-        if (!matchedSub && !sel.unitName.empty())
-            matchedSub = fw::resolveSubInterval(scheme, sel.unitName);
-        if (!matchedSub && !sel.intervalId.empty())
-            matchedIv = fw::resolveInterval(scheme, sel.intervalId.value);
-        if (!matchedSub && !matchedIv && !sel.unitName.empty())
-            matchedIv = fw::resolveInterval(scheme, sel.unitName);
+        if (!sel.subIntervalId.empty()) {
+            matchedSub=fw::findSubInterval(scheme,sel.subIntervalId);
+            if(!matchedSub) {error="指定小层编号不属于该方案修订";return false;}
+            if(!sel.intervalId.empty() && sel.intervalId!=matchedSub->interval) {
+                error="指定小层编号与父层编号冲突";return false;
+            }
+        } else if(!sel.intervalId.empty()) {
+            matchedIv=fw::findInterval(scheme,sel.intervalId);
+            if(!matchedIv) {error="指定父层编号不属于该方案修订";return false;}
+        } else if(!sel.unitName.empty()) {
+            const auto normalize=[](QString label) {
+                label.replace(QChar(0x2013),'-');label.replace(QChar(0x2014),'-');label.replace('~','-');
+                label.replace("/S","-S");label.replace("/s","-S");label.replace("-s","-S");return label;
+            };
+            const auto label=normalize(q(sel.unitName));size_t matches=0;
+            for(const auto& candidate:scheme.subIntervals) {
+                if(candidate.id.value==sel.unitName || normalize(q(fw::displayName(scheme,candidate.id)))==label) {
+                    matchedSub=&candidate;++matches;
+                }
+            }
+            for(const auto& candidate:scheme.intervals) {
+                if(candidate.id.value==sel.unitName || normalize(q(fw::displayName(scheme,candidate.id)))==label) {
+                    matchedIv=&candidate;++matches;
+                }
+            }
+            if(matches>1) {error="方案修订中的层段名称存在歧义，请指定准确层段编号";return false;}
+        }
+        if(!matchedSub && !matchedIv) {error="指定方案修订中没有该层段或小层";return false;}
     }
 
     // 读取时深首选设置以便填充 [topTimeMs, bottomTimeMs]
     std::vector<CorrelationTimeDepthPreference> tdPrefs;
     std::string ignoredErr;
-    readCorrelationTimeDepthPreferences(tdPrefs, ignoredErr);
+    if(!readCorrelationTimeDepthPreferences(tdPrefs,error))return false;
     std::map<long long, long long> prefByWell;
     for (const auto& p : tdPrefs) prefByWell[p.wellId] = p.timeDepthId;
 
@@ -921,7 +1022,7 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
     };
 
     // 线性重采样辅助函数
-    auto resampleFeatureTable = [](const WellFeatureTable& src, const std::vector<double>& targetDepths,
+    auto resampleFeatureTable = [&](const WellFeatureTable& src, const std::vector<double>& targetDepths,
                                    const std::vector<double>& outputAxis) -> WellFeatureTable {
         WellFeatureTable dst;
         dst.wellId = src.wellId;
@@ -938,6 +1039,7 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
             outCol.quality.assign(targetDepths.size(), 1);
 
             for (size_t i = 0; i < targetDepths.size(); ++i) {
+                if((i&4095)==0 && stopped())return WellFeatureTable{};
                 const double d = targetDepths[i];
                 auto it = std::lower_bound(src.depths.begin(), src.depths.end(), d);
                 if (it == src.depths.begin()) {
@@ -976,8 +1078,16 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
 
     // 3. 逐井解析地层顶底深度并截取测井数据
     for (long long wellId : targetWells) {
+        if(stopped())return false;
         WellStratigraphicLogSlice slice;
         slice.wellId = wellId;
+        DepthInfo rangeDepth;
+        if(hasScheme) {
+            slice.schemeId=scheme.id;slice.schemeRevision=scheme.revision.value;
+            QSqlQuery depth;
+            if(!st.exec("SELECT depth_json FROM wells WHERE id=?",{wellId},error,&depth))return false;
+            if(depth.next())rangeDepth=readDepth(object(depth.value(0).toString()));
+        }
         if (auto it = wellMap.find(wellId); it != wellMap.end()) {
             slice.wellName = it->second.wellName;
             slice.wellheadX = it->second.wellheadX;
@@ -997,8 +1107,8 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
             slice.unitName = readable;
             slice.trackName = "地震小层";
             if (range.resolved && isFinite(range.top) && isFinite(range.bottom) && range.bottom > range.top) {
-                slice.depthType = range.depthType.empty() ? "MD" : range.depthType;
-                slice.depthUnit = range.depthUnit.empty() ? "m" : range.depthUnit;
+                slice.depthType = range.depthType;
+                slice.depthUnit = range.depthUnit;
                 slice.topDepth = range.top;
                 slice.bottomDepth = range.bottom;
                 slice.thickness = range.bottom - range.top;
@@ -1016,8 +1126,8 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
             for (const auto& occ : scheme.wellOccurrences) {
                 if (occ.wellId == wellId && occ.interval == matchedIv->id) {
                     if (isFinite(occ.top) && isFinite(occ.bottom) && occ.bottom > occ.top) {
-                        slice.depthType = occ.depthType.empty() ? "MD" : occ.depthType;
-                        slice.depthUnit = occ.depthUnit.empty() ? "m" : occ.depthUnit;
+                        slice.depthType = occ.depthType;
+                        slice.depthUnit = occ.depthUnit;
                         slice.topDepth = occ.top;
                         slice.bottomDepth = occ.bottom;
                         slice.thickness = occ.bottom - occ.top;
@@ -1033,35 +1143,43 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
         }
 
         // (b) 若未在 StratigraphicScheme 命中（或用户请求的是常规分层道，如 '段'/'组'/'地震小层'），查询 tracks/intervals 表
-        if (!slice.resolved) {
+        if (sel.source==StratigraphicTrackSource::WellIntervalTrack) {
             std::string targetUnit = sel.unitName;
             if (targetUnit.empty() && !sel.subIntervalId.empty()) targetUnit = sel.subIntervalId.value;
             if (targetUnit.empty() && !sel.intervalId.empty()) targetUnit = sel.intervalId.value;
 
-            if (!targetUnit.empty()) {
-                QString sql = "SELECT t.name, t.depth_json, MIN(i.top), MAX(i.bottom) "
+            if (!targetUnit.empty() || sel.intervalRecordId>0) {
+                QString sql = "SELECT t.id, t.name, MIN(i.top), MAX(i.bottom),COUNT(i.id),MIN(i.id),MIN(i.name) "
                               "FROM intervals i JOIN tracks t ON t.id = i.track_id "
-                              "WHERE t.well_id=? AND i.name=? AND i.top IS NOT NULL AND i.bottom IS NOT NULL AND i.bottom > i.top";
-                QVariantList args{wellId, q(targetUnit)};
-                if (!sel.trackName.empty()) {
+                              "WHERE t.well_id=? AND i.top IS NOT NULL AND i.bottom IS NOT NULL AND i.bottom > i.top";
+                QVariantList args{wellId};
+                if(sel.intervalRecordId<=0){sql+=" AND i.name=?";args<<q(targetUnit);}
+                if(sel.trackId>0){sql+=" AND t.id=?";args<<sel.trackId;}
+                else if (!sel.trackName.empty()) {
                     sql += " AND (t.name=? OR t.type=?)";
                     args << q(sel.trackName) << q(sel.trackName);
                 }
-                sql += " GROUP BY t.id ORDER BY t.id LIMIT 1";
+                if(sel.intervalRecordId>0){sql+=" AND i.id=?";args<<sel.intervalRecordId;}
+                sql += " GROUP BY t.id ORDER BY t.id LIMIT 2";
                 QSqlQuery qIv;
                 if (!st.exec(sql, args, error, &qIv)) return false;
                 if (qIv.next() && !qIv.value(2).isNull() && !qIv.value(3).isNull()) {
-                    const DepthInfo di = readDepth(object(qIv.value(1).toString()));
-                    slice.trackName = s(qIv.value(0).toString());
-                    slice.unitId = targetUnit;
-                    slice.unitName = targetUnit;
-                    slice.depthType = di.depthType.empty() ? "MD" : di.depthType;
-                    slice.depthUnit = di.depthUnit.empty() ? "m" : di.depthUnit;
-                    slice.topDepth = qIv.value(2).toDouble();
-                    slice.bottomDepth = qIv.value(3).toDouble();
+                    const auto trackId=qIv.value(0).toLongLong();
+                    const auto recordId=qIv.value(5).toLongLong();
+                    const auto count=qIv.value(4).toLongLong();
+                    const auto actualUnit=s(qIv.value(6).toString());
+                    slice.trackName = s(qIv.value(1).toString());
+                    slice.topDepth=qIv.value(2).toDouble();slice.bottomDepth=qIv.value(3).toDouble();
+                    const bool ambiguous=count!=1 || qIv.next();qIv.finish();
+                    IntervalTrack info;if(!readIntervalTrackInfo(trackId,info,error))return false;
+                    rangeDepth=info.depthInfo;slice.trackId=trackId;slice.intervalRecordId=recordId;
+                    slice.unitId = "interval-record:"+std::to_string(recordId);
+                    slice.unitName = actualUnit;
+                    slice.depthType = rangeDepth.depthType;
+                    slice.depthUnit = rangeDepth.depthUnit;
                     slice.thickness = slice.bottomDepth - slice.topDepth;
-                    slice.resolved = true;
-                    slice.unresolvedReason.clear();
+                    slice.resolved = !ambiguous;
+                    slice.unresolvedReason=ambiguous?"分层名称对应多条道或记录，请指定实际道和记录编号":std::string();
                 } else if (slice.unresolvedReason.empty()) {
                     slice.unitName = targetUnit;
                     slice.trackName = sel.trackName;
@@ -1072,14 +1190,25 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
             }
         }
 
+        rangeDepth.depthType=slice.depthType;rangeDepth.depthUnit=slice.depthUnit;
+        if(slice.resolved && !knownDepth(rangeDepth)) {
+            slice.resolved=false;slice.unresolvedReason="分层深度类型或单位尚未确认，未截取曲线";
+        }
+
         // 若该层段已解析顶底深度，补充时深转换顶底时间、测井特征表及辅助层段道
         if (slice.resolved) {
             WellTdCurve tdCurve;
             const long long prefId = prefByWell.count(wellId) ? prefByWell[wellId] : 0;
-            if (extractWellTdCurve(*this, st, wellId, slice.wellName, slice.wellheadX, slice.wellheadY,
-                                   prefId, true, tdCurve)) {
-                slice.topTimeMs = interpolateTwtAtMd(tdCurve, slice.topDepth);
-                slice.bottomTimeMs = interpolateTwtAtMd(tdCurve, slice.bottomDepth);
+            if (!q(rangeDepth.mdReference).trimmed().isEmpty() &&
+                extractWellTdCurve(*this, st, wellId, slice.wellName, slice.wellheadX, slice.wellheadY,
+                                   prefId, false, tdCurve,true)) {
+                DepthInfo metres=rangeDepth;metres.depthUnit="m";
+                if(sameDepth(metres,tdCurve.depthInfo) && (rangeDepth.depthUnit=="m" || rangeDepth.depthUnit=="ft")) {
+                    const double scale=rangeDepth.depthUnit=="ft"?0.3048:1.0;
+                    slice.topTimeMs = interpolateTwtAtMd(tdCurve, slice.topDepth*scale);
+                    slice.bottomTimeMs = interpolateTwtAtMd(tdCurve, slice.bottomDepth*scale);
+                    slice.timeReference=tdCurve.timeReference;
+                }
             }
 
             // 查找该井匹配的曲线 ID（优先选用匹配曲线最多的 log_set）
@@ -1093,16 +1222,39 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
             long long bestSetId = 0;
             size_t bestSetCount = 0;
             for (const auto& [setId, cids] : curvesBySet) {
+                if(stopped())return false;
+                QSqlQuery axis;
+                if(!st.exec("SELECT l.depth_json,l.sample_count,s.kind,s.options,s.original_path FROM log_sets l LEFT JOIN sources s ON s.id=l.source_id WHERE l.id=? AND l.well_id=?",
+                    {setId,wellId},error,&axis))return false;
+                if(!axis.next())continue;
+                auto depth=readDepth(object(axis.value(0).toString()));
+                if(axis.value(2).toString()=="workbook" && object(axis.value(3).toString())["comprehensiveWellMetreDepth"].toBool()) {
+                    if(depth.depthType.empty())depth.depthType="MD";if(depth.depthUnit.empty())depth.depthUnit="m";
+                } else if(depth.depthType.empty() && axis.value(2).toString()=="logs" &&
+                    QFileInfo(axis.value(4).toString()).suffix().compare("las",Qt::CaseInsensitive)==0)depth.depthType="MD";
+                if(!sameDepth(rangeDepth,depth))continue;
+                const auto sourceSamples=axis.value(1).toLongLong();
+                if(sourceSamples<0 || cids.size()>64 || (cids.size() && sourceSamples>query.maxValues/static_cast<long long>(cids.size()))) {
+                    error="候选曲线组超过解码预算，请缩小曲线集合";return false;
+                }
                 if (cids.size() > bestSetCount) {
                     bestSetCount = cids.size();
                     bestSetId = setId;
                 }
+            }
+            if(!curvesBySet.empty() && !bestSetId) {
+                slice.resolved=false;slice.unresolvedReason="分层道与曲线组的深度类型、单位或起算面不一致，未截取曲线";
             }
             if (bestSetId > 0) {
                 std::string featErr;
                 WellFeatureTable rawTable;
                 if (prepareWellFeatures(wellId, curvesBySet[bestSetId], slice.topDepth, slice.bottomDepth,
                                         query.processed, rawTable, featErr)) {
+                    if(stopped() || !charge(rawTable.depths.size(),rawTable.columns.size()))return false;
+                    if((query.resampleStepMeters>0 || query.normalizedSampleCount>0) &&
+                       std::adjacent_find(rawTable.depths.begin(),rawTable.depths.end(),[](double a,double b){return b<=a;})!=rawTable.depths.end()) {
+                        error="重采样需要严格递增的深度轴，未排序或合并原始样点";return false;
+                    }
                     const bool exclusiveBottom=matchedSub&&matchedSub->index<SubIntervalCount;
                     if(exclusiveBottom){
                         while(!rawTable.depths.empty()&&rawTable.depths.back()>=slice.bottomDepth){
@@ -1111,9 +1263,25 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
                         }
                     }
                     if (query.resampleStepMeters > 0.0 && !rawTable.depths.empty()) {
+                        const double stepInAxis=query.resampleStepMeters*(rangeDepth.depthUnit=="ft"?1.0/0.3048:1.0);
+                        if(!isFinite(stepInAxis) || slice.topDepth+stepInAxis<=slice.topDepth) {
+                            error="重采样步长无法推进深度轴";return false;
+                        }
+                        const long double steps=(static_cast<long double>(slice.bottomDepth)-slice.topDepth)/stepInAxis;
+                        const long double count=exclusiveBottom?std::ceil(steps):std::floor(steps)+1;
+                        if(!std::isfinite(count) || count<1 || count>query.maxSamplesPerWell) {
+                            error="重采样样点数超过单井预算";return false;
+                        }
+                        const auto samples=static_cast<size_t>(count);
+                        if(!charge(samples,rawTable.columns.size()))return false;
                         std::vector<double> uniformDepths;
-                        for (double d = slice.topDepth; exclusiveBottom?d<slice.bottomDepth:d<=slice.bottomDepth+1e-9; d += query.resampleStepMeters)
+                        uniformDepths.reserve(samples);
+                        for(size_t i=0;i<samples;++i) {
+                            if((i&4095)==0 && stopped())return false;
+                            const double d=slice.topDepth+double(i)*stepInAxis;
+                            if(exclusiveBottom?d>=slice.bottomDepth:d>slice.bottomDepth)break;
                             uniformDepths.push_back(d);
+                        }
                         slice.featureTable = resampleFeatureTable(rawTable, uniformDepths, uniformDepths);
                     } else {
                         slice.featureTable = std::move(rawTable);
@@ -1121,35 +1289,96 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
 
                     if (query.normalizedSampleCount > 0 && !slice.featureTable.depths.empty()) {
                         const int K = query.normalizedSampleCount;
+                        if(!charge(size_t(K),slice.featureTable.columns.size()))return false;
                         std::vector<double> targetDepths(size_t(K), 0.0);
                         std::vector<double> relAxis(size_t(K), 0.0);
                         for (int k = 0; k < K; ++k) {
+                            if((k&4095)==0 && stopped())return false;
                             const double f = (K == 1) ? 0.5 : (double(k) / double(exclusiveBottom?K:K-1));
                             relAxis[size_t(k)] = f;
                             targetDepths[size_t(k)] = slice.topDepth + f * (slice.bottomDepth - slice.topDepth);
                         }
                         slice.normalizedFeatureTable = resampleFeatureTable(slice.featureTable, targetDepths, relAxis);
+                        slice.normalizedFeatureTable.depthUnit="1";
                     }
-                }
+                    if(stopped())return false;
+                } else {error=featErr;return false;}
             }
 
-            if (query.includeAuxiliaryIntervals) {
-                std::vector<DataEntry> trackEntries;
-                if (!listData("intervals", wellId, trackEntries, error)) return false;
-                std::vector<long long> trackIds;
-                trackIds.reserve(trackEntries.size());
-                for (const auto& te : trackEntries) trackIds.push_back(te.id);
-                if (!trackIds.empty()) {
-                    std::string cmpErr;
-                    compareIntervals(trackIds, slice.topDepth, slice.bottomDepth, slice.auxiliaryTracks, cmpErr);
+            if (query.includeAuxiliaryIntervals && slice.resolved) {
+                // Bound inspected work as well as emitted records. Do not call
+                // compareIntervals: it enumerates every project track and reads
+                // every matching interval before the caller can enforce a limit.
+                QSqlQuery tracks;
+                if(!st.exec("SELECT t.id,coalesce(length(CAST(t.name AS BLOB)),0)+coalesce(length(CAST(t.type AS BLOB)),0)+"
+                            "coalesce(length(CAST(t.depth_json AS BLOB)),0)+coalesce(length(CAST(t.sheet AS BLOB)),0)+"
+                            "coalesce(length(CAST(s.stored_path AS BLOB)),0)+coalesce(length(CAST(s.options AS BLOB)),0)+coalesce(length(CAST(s.kind AS BLOB)),0) "
+                            "FROM tracks t LEFT JOIN sources s ON s.id=t.source_id WHERE t.well_id=? "
+                            "ORDER BY t.id LIMIT ?",{wellId,query.maxAuxiliaryTracks-auxiliaryTracks+1},error,&tracks))return false;
+                while(tracks.next()) {
+                    if(stopped())return false;
+                    if(++auxiliaryTracks>query.maxAuxiliaryTracks) {error="辅助分层道检视数量超过预算";return false;}
+                    if(!chargeAuxiliaryBytes(256+tracks.value(1).toLongLong()))return false;
+                    const auto trackId=tracks.value(0).toLongLong();
+                    IntervalTrack info;if(!readIntervalTrackInfo(trackId,info,error))return false;
+                    if(!sameDepth(rangeDepth,info.depthInfo))continue;
+                    const auto generated=object(q(info.sourceSheet));
+                    if(generated["generator"].toString()=="paleo.seismic_stratigraphy" &&
+                       (sel.source!=StratigraphicTrackSource::SeismicFramework || generated["schemeId"].toString()!=q(scheme.id) ||
+                        generated["schemeRevision"].toString()!=q(scheme.revision.value)))continue;
+                    IntervalTrackResult group;group.trackId=trackId;group.wellId=wellId;group.name=info.trackName;group.depthInfo=info.depthInfo;
+                    // The track/depth index provides bounded streaming without
+                    // sorting an unbounded source window. Restore display order
+                    // after the bounded records have been selected.
+                    const auto textLimit=std::min(1048576LL,query.maxAuxiliaryBytes-auxiliaryBytes);
+                    QSqlQuery rows;
+                    if(!st.exec("SELECT id,track_id,ordinal,original_id,"
+                                "CASE WHEN coalesce(length(CAST(name AS BLOB)),0)<=? THEN name END,"
+                                "top,bottom,top_tvd,bottom_tvd,top_ss,bottom_ss,"
+                                "CASE WHEN coalesce(length(CAST(facies AS BLOB)),0)<=? THEN facies END,"
+                                "top_unc,bottom_unc,not_penetrated,"
+                                "CASE WHEN coalesce(length(CAST(properties AS BLOB)),0)<=? THEN properties END,source_row,"
+                                "coalesce(length(CAST(name AS BLOB)),0)+coalesce(length(CAST(facies AS BLOB)),0)+coalesce(length(CAST(properties AS BLOB)),0) "
+                                "FROM intervals WHERE track_id=? ORDER BY top,bottom,id LIMIT ?",
+                                {textLimit,textLimit,textLimit,trackId,query.maxAuxiliaryRecords-auxiliaryRecords+1},error,&rows))return false;
+                    while(rows.next()) {
+                        if(stopped())return false;
+                        if(++auxiliaryRecords>query.maxAuxiliaryRecords) {error="辅助分层记录检视数量超过预算";return false;}
+                        const auto textBytes=rows.value(17).toLongLong();
+                        if(textBytes>textLimit || !chargeAuxiliaryBytes(128+textBytes)) {
+                            if(error.empty())error="单条辅助分层文本超过1 MiB或剩余字节预算";
+                            return false;
+                        }
+                        const auto top=value(rows.value(5)),bottom=value(rows.value(6));
+                        if((isFinite(bottom)&&bottom<slice.topDepth)||(isFinite(top)&&top>slice.bottomDepth))continue;
+                        IntervalRecord record;record.id=rows.value(0).toLongLong();record.trackId=rows.value(1).toLongLong();
+                        auto& interval=record.value;interval.displayOrder=rows.value(2).toInt();interval.intervalId=rows.value(3).toInt();
+                        interval.intervalName=s(rows.value(4).toString());interval.topDepth=top;interval.bottomDepth=bottom;
+                        interval.topTvd=value(rows.value(7));interval.bottomTvd=value(rows.value(8));
+                        interval.topTvdss=value(rows.value(9));interval.bottomTvdss=value(rows.value(10));
+                        interval.faciesType=s(rows.value(11).toString());interval.topUnconformity=rows.value(12).toInt();
+                        interval.bottomUnconformity=rows.value(13).toInt();interval.bottomNotPenetrated=rows.value(14).toInt();
+                        const auto properties=QJsonDocument::fromJson(rows.value(15).toString().toUtf8()).array();
+                        if(properties.size()>4096 || !chargeAuxiliaryBytes(static_cast<long long>(properties.size())*sizeof(Measurement))) {
+                            if(error.empty())error="单条辅助分层属性超过4096项预算";
+                            return false;
+                        }
+                        interval.properties=readMeasurements(properties);
+                        interval.sourceRow=rows.value(16).toInt();group.intervals.push_back(std::move(record));
+                    }
+                    std::sort(group.intervals.begin(),group.intervals.end(),[](const auto& a,const auto& b) {
+                        return std::tie(a.value.displayOrder,a.id)<std::tie(b.value.displayOrder,b.id);
+                    });
+                    slice.auxiliaryTracks.push_back(std::move(group));
                 }
             }
         }
 
-        results.push_back(std::move(slice));
+        pending.push_back(std::move(slice));
     }
 
-    return true;
+    if(stopped())return false;
+    results=std::move(pending);return true;
 }
 
 } // namespace paleo::data
