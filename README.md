@@ -9,6 +9,8 @@
 - 测井曲线、地层/岩性分层、样品表、井口坐标、测斜、时深关系、岩心照片路径与附件关联。
 - CSV/LAS、SpreadsheetML XML、XLS/XLSX、部分 Petrel 文本格式、地震层位文本和图件元信息解析。
 - 每文件事务、重复检查、来源追溯、质量标记、人工修改、明确重导入、重开和数据库备份。
+- [曲线真窗口、分页和显式旧库升级](docs/curve-windows.md)，按命中小块读取并携带预算/取消。
+- [薄元数据变更日志与写入代次保护](docs/model-changes.md)，供宿主事务性维护增量投影。
 - 基于 segyio 的有界文件检查、单道、INLINE/XLINE、时间切片和 XY 路径剖面；大地震体始终保持外部路径。
 - 原始分辨率的剖面/切片、多点坐标剖面墙、1:1 缩放和原尺寸 PNG 导出；详情见 [高清地震指南](docs/hd-seismic.md)。
 - 时间切片支持 IL/XL 范围、分块显示、相邻时间缓存和 1/2/4 线程；可比较旧通道、连续缓冲及 Windows 映射读取，见 [切片性能指南](docs/time-slice-performance.md)。
@@ -28,7 +30,7 @@
 
 ## 编译
 
-需要 C++20 编译器、CMake 3.24 或更高版本、Qt6 Core/Gui/Sql/Widgets、Zlib，以及 Qt SQLite 驱动。Windows 使用与 Qt 匹配的 MSVC x64 工具链。以下为单配置 Ninja 示例，路径应替换为自己的安装位置：
+需要 C++20 编译器、CMake 3.24 或更高版本、Qt6 Core/Gui/Sql/Widgets、Zlib，以及 Qt SQLite 驱动；构建测试还需 Qt6 Test。可选 Zstd 用于 SF3P 压缩页读取，未提供时只支持未压缩页。Windows 使用与 Qt 匹配的 MSVC x64 工具链。以下为单配置 Ninja 示例，路径应替换为自己的安装位置：
 
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="C:/Qt/6.x/msvc2022_64" -DZLIB_ROOT="C:/deps/zlib"

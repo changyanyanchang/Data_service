@@ -9,7 +9,9 @@
 #include <cstring>
 #include <deque>
 #include <limits>
+#include <list>
 #include <set>
+#include <unordered_map>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -37,6 +39,43 @@ constexpr std::uint64_t kLegacyHeaderBytes = 256;
 constexpr std::uint64_t kHeaderAlignment = 4096;
 constexpr std::uint64_t kMaxHeaderBytes = 64ull * 1024ull * 1024ull;
 constexpr std::uint64_t kFlushEveryChunks = 32;
+constexpr std::uint64_t kMaxDecodedPageBytes = 64ull * 1024ull * 1024ull;
+constexpr std::uint64_t kMaxBoxValues = 64ull * 1024ull * 1024ull;
+constexpr std::size_t kMaxPlannedPages = 1024u * 1024u;
+
+bool CheckedAdd(std::uint64_t a, std::uint64_t b, std::uint64_t& out) {
+    if(b > std::numeric_limits<std::uint64_t>::max() - a) return false;
+    out = a + b;
+    return true;
+}
+bool CheckedMultiply(std::uint64_t a, std::uint64_t b, std::uint64_t& out) {
+    if(a != 0 && b > std::numeric_limits<std::uint64_t>::max() / a) return false;
+    out = a * b;
+    return true;
+}
+std::uint32_t CeilDivide(std::uint32_t a, std::uint32_t b) {
+    return b == 0 ? 0 : a / b + (a % b != 0);
+}
+bool ValidReadAxis(const AxisDescriptor& axis) {
+    if(axis.count <= 0 || !axis.Validate()) return false;
+    if(axis.encoding != AxisDescriptor::Encoding::Uniform) return true;
+    const auto displacement = std::int64_t(axis.count - 1) * axis.step;
+    const auto last = std::int64_t(axis.origin) + displacement;
+    // Existing AxisDescriptor::ValueAt evaluates index*step in int. Refuse
+    // metadata that would overflow that intermediate even when the sum fits.
+    return displacement >= std::numeric_limits<int>::min() &&
+        displacement <= std::numeric_limits<int>::max() &&
+        last >= std::numeric_limits<int>::min() && last <= std::numeric_limits<int>::max();
+}
+bool ExactReadIndex(const AxisDescriptor& axis, int value, int& index) {
+    if(axis.encoding != AxisDescriptor::Encoding::Uniform) return axis.ExactIndexOf(value, index);
+    const auto difference = std::int64_t(value) - axis.origin;
+    if(difference % axis.step != 0) return false;
+    const auto position = difference / axis.step;
+    if(position < 0 || position >= axis.count) return false;
+    index = static_cast<int>(position);
+    return true;
+}
 
 double MsSince(const std::chrono::steady_clock::time_point& start) {
     return static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -181,6 +220,10 @@ bool ConsumeAxis(const std::vector<unsigned char>& data, std::size_t& offset, Ax
        !Consume(data, offset, origin) || !Consume(data, offset, step)) {
         return false;
     }
+    if(encoding > 1 || count < 0 ||
+       (encoding == 1 && static_cast<std::uint64_t>(count) > (data.size() - offset) / 4)) {
+        return false;
+    }
     axis.encoding = encoding == 1 ? AxisDescriptor::Encoding::Explicit
                                   : AxisDescriptor::Encoding::Uniform;
     axis.count = count;
@@ -204,25 +247,25 @@ bool ConsumeAxis(const std::vector<unsigned char>& data, std::size_t& offset, Ax
 // ------------------------------------------------------------------- info
 
 std::uint32_t PagedWorkspaceInfo::ChunksI() const {
-    return (static_cast<std::uint32_t>(inlineAxis.count) + chunkInlines - 1) / std::max(1u, chunkInlines);
+    return CeilDivide(static_cast<std::uint32_t>(inlineAxis.count), chunkInlines);
 }
 std::uint32_t PagedWorkspaceInfo::ChunksX() const {
-    return (static_cast<std::uint32_t>(xlineAxis.count) + chunkXlines - 1) / std::max(1u, chunkXlines);
+    return CeilDivide(static_cast<std::uint32_t>(xlineAxis.count), chunkXlines);
 }
 std::uint32_t PagedWorkspaceInfo::ChunksT() const {
-    return (samples + chunkSamples - 1) / std::max(1u, chunkSamples);
+    return CeilDivide(samples, chunkSamples);
 }
 std::uint64_t PagedWorkspaceInfo::ChunkCount() const {
     return static_cast<std::uint64_t>(ChunksI()) * ChunksX() * ChunksT();
 }
 std::uint32_t PagedWorkspaceInfo::PagesI() const {
-    return (chunkInlines + pageInlines - 1) / std::max(1u, pageInlines);
+    return CeilDivide(chunkInlines, pageInlines);
 }
 std::uint32_t PagedWorkspaceInfo::PagesX() const {
-    return (chunkXlines + pageXlines - 1) / std::max(1u, pageXlines);
+    return CeilDivide(chunkXlines, pageXlines);
 }
 std::uint32_t PagedWorkspaceInfo::PagesT() const {
-    return (chunkSamples + pageSamples - 1) / std::max(1u, pageSamples);
+    return CeilDivide(chunkSamples, pageSamples);
 }
 std::uint64_t PagedWorkspaceInfo::PagesPerChunk() const {
     return static_cast<std::uint64_t>(PagesI()) * PagesX() * PagesT();
@@ -639,18 +682,133 @@ bool PagedWorkspaceWriter::Finalize(std::string& errorMessage) {
 struct PagedWorkspaceReader::Impl {
     PagedWorkspaceInfo info;
     std::vector<unsigned char> header;
-    std::vector<unsigned char> bitmap;
-    std::vector<unsigned char> pageDir;
     std::uint64_t headerBytes = 0;
     std::uint64_t bitmapOffset = 0;
+    std::uint64_t bitmapBytes = 0;
     std::uint64_t pageDirOffset = 0;
+    std::uint64_t pageDirBytes = 0;
     std::uint64_t dataOffset = 0;
+    std::uint64_t fileBytes = 0;
+    std::uint64_t chunkCount = 0, pageCount = 0, pagesPerChunk = 0, pageBytes = 0;
     std::shared_ptr<std::ifstream> file;
     Stats stats;
     std::shared_ptr<ChunkCache> pageCache;
     std::uint64_t cacheSourceKey = 0;
-    bool complete = false;
+    bool open = false;
     bool metadataOnly = false;
+
+    struct DirectoryBlock {
+        std::vector<unsigned char> bytes;
+        std::list<std::uint64_t>::iterator lru;
+    };
+    std::list<std::uint64_t> directoryLru;
+    std::unordered_map<std::uint64_t, DirectoryBlock> directoryBlocks;
+
+    void TrimDirectory(std::uint64_t incoming = 0) {
+        while(!directoryLru.empty() &&
+              stats.directoryCacheBytes > stats.directoryCacheBudgetBytes - incoming) {
+            const auto key = directoryLru.back();
+            stats.directoryCacheBytes -= directoryBlocks.at(key).bytes.size();
+            directoryBlocks.erase(key);
+            directoryLru.pop_back();
+        }
+    }
+
+    bool ReadAt(std::uint64_t offset, std::size_t bytes, unsigned char* out,
+                std::string& errorMessage) {
+        if(offset > fileBytes || bytes > fileBytes - offset) {
+            errorMessage = "the paged directory or payload range is outside the file";
+            return false;
+        }
+        file->clear();
+        file->seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+        file->read(reinterpret_cast<char*>(out), static_cast<std::streamsize>(bytes));
+        stats.directoryReadBytes += static_cast<std::uint64_t>(file->gcount());
+        ++stats.directoryReadCalls;
+        if(!*file) {
+            errorMessage = "a paged directory read failed";
+            return false;
+        }
+        return true;
+    }
+
+    bool DirectoryBytes(std::uint64_t section, std::uint64_t sectionBytes,
+                        std::uint64_t relative, std::size_t bytes, unsigned char* out,
+                        std::string& errorMessage) {
+        if(relative > sectionBytes || bytes > sectionBytes - relative) {
+            errorMessage = "the paged directory entry is out of range";
+            return false;
+        }
+        const auto blockBytes = std::min<std::uint64_t>(64u << 10,
+            (stats.directoryCacheBudgetBytes / 32) * 32);
+        if(blockBytes == 0) {
+            ++stats.directoryCacheMisses;
+            return ReadAt(section + relative, bytes, out, errorMessage);
+        }
+        const auto base = relative / blockBytes * blockBytes;
+        const auto key = section + base;
+        const auto inBlock = static_cast<std::size_t>(relative - base);
+        auto found = directoryBlocks.find(key);
+        if(found == directoryBlocks.end()) {
+            ++stats.directoryCacheMisses;
+            const auto count = static_cast<std::size_t>(std::min(blockBytes, sectionBytes - base));
+            TrimDirectory(count); // Evict before allocating, not after peak growth.
+            DirectoryBlock block;
+            block.bytes.resize(count);
+            if(!ReadAt(key, count, block.bytes.data(), errorMessage)) return false;
+            directoryLru.push_front(key);
+            block.lru = directoryLru.begin();
+            found = directoryBlocks.emplace(key, std::move(block)).first;
+            stats.directoryCacheBytes += count;
+            stats.directoryCachePeakBytes = std::max(stats.directoryCachePeakBytes,
+                                                      stats.directoryCacheBytes);
+        } else {
+            ++stats.directoryCacheHits;
+            directoryLru.splice(directoryLru.begin(), directoryLru, found->second.lru);
+        }
+        if(inBlock > found->second.bytes.size() || bytes > found->second.bytes.size() - inBlock) {
+            errorMessage = "the paged directory entry crosses a cache block";
+            return false;
+        }
+        std::memcpy(out, found->second.bytes.data() + inBlock, bytes);
+        return true;
+    }
+
+    bool ValidateLayout(std::string& errorMessage) {
+        const auto& v = info;
+        const auto validDimension = [](std::uint32_t n) {
+            return n > 0 && n <= static_cast<std::uint32_t>(std::numeric_limits<int>::max());
+        };
+        std::uint64_t chunksIX = 0, pagesIX = 0, pagesT = 0, chunkDirBytes = 0;
+        bool valid = ValidReadAxis(v.inlineAxis) && ValidReadAxis(v.xlineAxis) &&
+            validDimension(v.samples) && validDimension(v.chunkInlines) &&
+            validDimension(v.chunkXlines) && validDimension(v.chunkSamples) &&
+            validDimension(v.pageInlines) && validDimension(v.pageXlines) &&
+            validDimension(v.pageSamples) && v.pageInlines <= v.chunkInlines &&
+            v.pageXlines <= v.chunkXlines && v.pageSamples <= v.chunkSamples &&
+            (v.codec == kPagedCodecRaw || v.codec == kPagedCodecZstd) &&
+            CheckedMultiply(v.ChunksI(), v.ChunksX(), chunksIX) &&
+            CheckedMultiply(chunksIX, v.ChunksT(), chunkCount) &&
+            CheckedMultiply(v.PagesI(), v.PagesX(), pagesIX) &&
+            CheckedMultiply(pagesIX, v.PagesT(), pagesPerChunk) &&
+            CheckedMultiply(chunkCount, pagesPerChunk, pageCount) &&
+            CheckedMultiply(v.pageInlines, v.pageXlines, pagesIX) &&
+            CheckedMultiply(pagesIX, v.pageSamples, pagesT) &&
+            CheckedMultiply(pagesT, sizeof(float), pageBytes) &&
+            pageBytes <= kMaxDecodedPageBytes &&
+            CheckedMultiply(chunkCount, 12, chunkDirBytes) &&
+            CheckedMultiply(pageCount, 32, pageDirBytes);
+        if(valid) {
+            bitmapBytes = chunkCount / 8 + (chunkCount % 8 != 0);
+            bitmapOffset = headerBytes;
+            valid = CheckedAdd(bitmapOffset, bitmapBytes, pageDirOffset) &&
+                CheckedAdd(pageDirOffset, chunkDirBytes, pageDirOffset) &&
+                CheckedAdd(pageDirOffset, pageDirBytes, dataOffset) &&
+                dataOffset <= static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max());
+        }
+        if(!valid) errorMessage = "the paged workspace layout is invalid, overflowing or exceeds page limits";
+        return valid;
+    }
 
     struct PageEntry {
         std::uint64_t offset = 0;
@@ -659,15 +817,35 @@ struct PagedWorkspaceReader::Impl {
         std::uint64_t crc = 0;
         std::uint32_t codec = 0;
     };
-    const PageEntry Entry(std::uint64_t pageIndex) const {
-        PageEntry entry;
-        const std::size_t base = static_cast<std::size_t>(pageIndex) * 32;
-        std::memcpy(&entry.offset, pageDir.data() + base, 8);
-        std::memcpy(&entry.storedBytes, pageDir.data() + base + 8, 4);
-        std::memcpy(&entry.rawBytes, pageDir.data() + base + 12, 4);
-        std::memcpy(&entry.crc, pageDir.data() + base + 16, 8);
-        std::memcpy(&entry.codec, pageDir.data() + base + 24, 4);
-        return entry;
+    bool Entry(std::uint64_t pageIndex, PageEntry& entry, std::string& errorMessage) {
+        if(pageIndex >= pageCount) {
+            errorMessage = "the page index is out of range";
+            return false;
+        }
+        const auto chunk = pageIndex / pagesPerChunk;
+        unsigned char bit = 0;
+        if(!DirectoryBytes(bitmapOffset, bitmapBytes, chunk / 8, 1, &bit, errorMessage)) return false;
+        if((bit & (1u << (chunk % 8))) == 0) {
+            errorMessage = "the requested paged chunk is incomplete";
+            return false;
+        }
+        unsigned char bytes[32];
+        if(!DirectoryBytes(pageDirOffset, pageDirBytes, pageIndex * 32, sizeof(bytes), bytes, errorMessage)) return false;
+        std::memcpy(&entry.offset, bytes, 8);
+        std::memcpy(&entry.storedBytes, bytes + 8, 4);
+        std::memcpy(&entry.rawBytes, bytes + 12, 4);
+        std::memcpy(&entry.crc, bytes + 16, 8);
+        std::memcpy(&entry.codec, bytes + 24, 4);
+        // Stored bytes may be slightly larger than raw bytes for tiny zstd pages.
+        const auto maxStored = pageBytes + pageBytes / 128 + (128u << 10);
+        if(entry.rawBytes != pageBytes || entry.storedBytes == 0 || entry.storedBytes > maxStored ||
+           (entry.codec != kPagedCodecRaw && entry.codec != kPagedCodecZstd) ||
+           (entry.codec == kPagedCodecRaw && entry.storedBytes != entry.rawBytes) ||
+           entry.offset < dataOffset || entry.offset > fileBytes || entry.storedBytes > fileBytes - entry.offset) {
+            errorMessage = "a paged directory entry has invalid codec, size or payload bounds";
+            return false;
+        }
+        return true;
     }
 };
 
@@ -681,7 +859,12 @@ const PagedWorkspaceReader::Stats& PagedWorkspaceReader::ReaderStats() const {
 }
 void PagedWorkspaceReader::ResetReaderStats() {
     if(impl_) {
+        const auto current = impl_->stats.directoryCacheBytes;
+        const auto budget = impl_->stats.directoryCacheBudgetBytes;
         impl_->stats = Stats{};
+        impl_->stats.directoryCacheBytes = current;
+        impl_->stats.directoryCachePeakBytes = current;
+        impl_->stats.directoryCacheBudgetBytes = budget;
     }
 }
 void PagedWorkspaceReader::SetPageCache(std::shared_ptr<ChunkCache> cache) {
@@ -696,16 +879,41 @@ std::uint64_t PagedWorkspaceReader::CacheSourceKey() const {
     return impl_ ? impl_->cacheSourceKey : 0;
 }
 
+void PagedWorkspaceReader::SetDirectoryCacheBudget(std::size_t bytes) {
+    directoryCacheBudget_ = bytes;
+    if(impl_) {
+        // Block alignment depends on the budget. Drop old blocks on any change.
+        impl_->directoryBlocks.clear();
+        impl_->directoryLru.clear();
+        impl_->stats.directoryCacheBytes = 0;
+        impl_->stats.directoryCacheBudgetBytes = bytes;
+    }
+}
+std::size_t PagedWorkspaceReader::DirectoryCacheBudget() const {
+    return impl_ ? static_cast<std::size_t>(impl_->stats.directoryCacheBudgetBytes) : directoryCacheBudget_;
+}
+
 bool PagedWorkspaceReader::Open(const std::filesystem::path& path, std::string& errorMessage,
                                 bool metadataOnly) {
+    errorMessage.clear();
     impl_ = std::make_shared<Impl>();
+    impl_->stats.directoryCacheBudgetBytes = directoryCacheBudget_;
     impl_->file = std::make_shared<std::ifstream>(path, std::ios::binary);
     if(!*impl_->file) {
         errorMessage = "cannot open the paged workspace";
         return false;
     }
+    impl_->file->seekg(0, std::ios::end);
+    const auto lengthAtOpen = impl_->file->tellg();
+    if(lengthAtOpen < 0) {
+        errorMessage = "cannot determine the paged workspace length";
+        return false;
+    }
+    impl_->fileBytes = static_cast<std::uint64_t>(lengthAtOpen);
+    impl_->file->seekg(0, std::ios::beg);
     std::vector<unsigned char> prefix(16, 0);
     impl_->file->read(reinterpret_cast<char*>(prefix.data()), static_cast<std::streamsize>(prefix.size()));
+    impl_->stats.headerReadBytes += static_cast<std::uint64_t>(impl_->file->gcount());
     if(!*impl_->file || std::memcmp(prefix.data(), kPagedWorkspaceMagic, 8) != 0) {
         errorMessage = "the paged workspace magic is wrong";
         return false;
@@ -731,6 +939,7 @@ bool PagedWorkspaceReader::Open(const std::filesystem::path& path, std::string& 
     impl_->file->clear();
     impl_->file->seekg(0, std::ios::beg);
     impl_->file->read(reinterpret_cast<char*>(header.data()), static_cast<std::streamsize>(header.size()));
+    impl_->stats.headerReadBytes += static_cast<std::uint64_t>(impl_->file->gcount());
     if(!*impl_->file) {
         errorMessage = "the paged workspace header is truncated";
         return false;
@@ -781,62 +990,50 @@ bool PagedWorkspaceReader::Open(const std::filesystem::path& path, std::string& 
         errorMessage = "the paged workspace axes are truncated";
         return false;
     }
-    if(!info.inlineAxis.Validate() || !info.xlineAxis.Validate() || info.inlineAxis.count <= 0 ||
-       info.xlineAxis.count <= 0 || info.samples == 0) {
-        errorMessage = "the paged workspace axes are invalid";
+    if(completeFlag > 1) {
+        errorMessage = "the paged workspace completion flag is invalid";
         return false;
     }
+    if(!impl_->ValidateLayout(errorMessage)) return false;
     info.complete = completeFlag != 0;
-
-    const std::uint64_t chunkCount = info.ChunkCount();
-    const std::uint64_t pageCount = info.PageCount();
-    const std::uint64_t bitmapBytes = (chunkCount + 7) / 8;
     impl_->header = std::move(header);
-    impl_->bitmapOffset = impl_->headerBytes;
-    impl_->pageDirOffset = impl_->bitmapOffset + bitmapBytes + chunkCount * 12;
-    impl_->dataOffset = impl_->pageDirOffset + pageCount * 32;
     // Bind all axes, source metadata, format and generation, plus actual derivative identity.
-    impl_->cacheSourceKey = Fnv1a(header.data(), header.size(), kFnvOffset);
+    impl_->cacheSourceKey = Fnv1a(impl_->header.data(), impl_->header.size(), kFnvOffset);
     const auto canonical = std::filesystem::absolute(path).lexically_normal().u8string();
     impl_->cacheSourceKey = Fnv1a(canonical.data(), canonical.size(), impl_->cacheSourceKey);
     std::error_code identityError;
     const auto stamp = std::filesystem::last_write_time(path, identityError).time_since_epoch().count();
     if(!identityError) impl_->cacheSourceKey = Fnv1a(&stamp, sizeof(stamp), impl_->cacheSourceKey);
-    const auto length = std::filesystem::file_size(path, identityError);
-    if(!identityError) impl_->cacheSourceKey = Fnv1a(&length, sizeof(length), impl_->cacheSourceKey);
+    impl_->cacheSourceKey = Fnv1a(&impl_->fileBytes, sizeof(impl_->fileBytes), impl_->cacheSourceKey);
     if(metadataOnly) {
         impl_->metadataOnly = true;
+        impl_->open = true;
         return true;
     }
-    impl_->bitmap.assign(static_cast<std::size_t>(bitmapBytes), 0);
-    impl_->pageDir.assign(static_cast<std::size_t>(pageCount * 32), 0);
-    impl_->file->seekg(static_cast<std::streamoff>(impl_->bitmapOffset), std::ios::beg);
-    impl_->file->read(reinterpret_cast<char*>(impl_->bitmap.data()),
-                      static_cast<std::streamsize>(impl_->bitmap.size()));
-    // The chunk directory sits between the bitmap and the page directory.
-    impl_->file->seekg(static_cast<std::streamoff>(impl_->pageDirOffset), std::ios::beg);
-    impl_->file->read(reinterpret_cast<char*>(impl_->pageDir.data()),
-                      static_cast<std::streamsize>(impl_->pageDir.size()));
-    if(!*impl_->file) {
+    if(impl_->dataOffset > impl_->fileBytes) {
         errorMessage = "the paged workspace directory is truncated";
         return false;
     }
+    impl_->open = true;
     return true;
 }
 
 bool PagedWorkspaceReader::ReadPageBytes(std::uint64_t pageIndex, std::uint64_t byteOffset,
                                          std::uint64_t byteLength, std::vector<unsigned char>& out,
                                          std::string& errorMessage) {
-    if(!impl_ || impl_->metadataOnly || pageIndex >= impl_->info.PageCount()) {
+    out.clear();
+    errorMessage.clear();
+    if(!impl_ || !impl_->open || impl_->metadataOnly || pageIndex >= impl_->pageCount) {
         errorMessage = "the page index is out of range";
         return false;
     }
-    const Impl::PageEntry entry = impl_->Entry(pageIndex);
+    Impl::PageEntry entry;
+    if(!impl_->Entry(pageIndex, entry, errorMessage)) return false;
     if(entry.codec != kPagedCodecRaw) {
         errorMessage = "raw partial reads need raw pages";
         return false;
     }
-    if(byteOffset + byteLength > entry.storedBytes) {
+    if(byteOffset > entry.storedBytes || byteLength > entry.storedBytes - byteOffset) {
         errorMessage = "the partial read exceeds the page";
         return false;
     }
@@ -845,6 +1042,7 @@ bool PagedWorkspaceReader::ReadPageBytes(std::uint64_t pageIndex, std::uint64_t 
     impl_->file->seekg(static_cast<std::streamoff>(entry.offset + byteOffset), std::ios::beg);
     impl_->file->read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(byteLength));
     if(!*impl_->file) {
+        out.clear();
         errorMessage = "a paged partial page read failed";
         return false;
     }
@@ -859,6 +1057,13 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
                                    int inlines, int xlines, int samples,
                                    std::vector<float>& out, std::string& errorMessage, CancelToken* cancel,
                                    bool timeDisplayLayout) {
+    out.clear();
+    errorMessage.clear();
+    struct ClearFailedOutput {
+        std::vector<float>& output;
+        bool success = false;
+        ~ClearFailedOutput() { if(!success) output.clear(); }
+    } outputGuard{out};
     auto cancelled = [&]() {
         if(!Cancelled(cancel)) return false;
         out.clear();
@@ -866,7 +1071,7 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
         return true;
     };
     if(cancelled()) return false;
-    if(!impl_) {
+    if(!impl_ || !impl_->open) {
         errorMessage = "the paged workspace is not open";
         return false;
     }
@@ -882,22 +1087,29 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
     // Exact axis gate: only real axis elements can be requested.
     int iIndex = 0;
     int xIndex = 0;
-    if(!info.inlineAxis.ExactIndexOf(inlineIndex, iIndex)) {
+    if(!ExactReadIndex(info.inlineAxis, inlineIndex, iIndex)) {
         errorMessage = "inline " + std::to_string(inlineIndex) + " is not present in this workspace";
         return false;
     }
-    if(!info.xlineAxis.ExactIndexOf(xlineIndex, xIndex)) {
+    if(!ExactReadIndex(info.xlineAxis, xlineIndex, xIndex)) {
         errorMessage = "xline " + std::to_string(xlineIndex) + " is not present in this workspace";
         return false;
     }
-    if(iIndex + inlines > info.inlineAxis.count || xIndex + xlines > info.xlineAxis.count ||
-       sampleIndex < 0 || sampleIndex + samples > static_cast<int>(info.samples)) {
+    if(inlines > info.inlineAxis.count - iIndex || xlines > info.xlineAxis.count - xIndex ||
+       sampleIndex < 0 || sampleIndex > static_cast<int>(info.samples) ||
+       samples > static_cast<int>(info.samples) - sampleIndex) {
         errorMessage = "the requested box is outside the workspace";
         return false;
     }
 
     const auto start = std::chrono::steady_clock::now();
-    out.assign(static_cast<std::size_t>(inlines) * xlines * samples,
+    std::uint64_t count = 0;
+    if(!CheckedMultiply(inlines, xlines, count) || !CheckedMultiply(count, samples, count) ||
+       count > kMaxBoxValues || count > out.max_size()) {
+        errorMessage = "the requested paged box exceeds the 64M value limit";
+        return false;
+    }
+    out.assign(static_cast<std::size_t>(count),
                std::numeric_limits<float>::quiet_NaN());
 
     const std::uint32_t ci0 = static_cast<std::uint32_t>(iIndex) / info.chunkInlines;
@@ -910,30 +1122,48 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
     struct Needed {
         std::uint64_t page = 0;
         std::uint32_t i0 = 0, x0 = 0, t0 = 0;
+        Impl::PageEntry entry;
     };
     std::vector<Needed> needed;
     for(std::uint32_t ct = ct0; ct <= ct1; ++ct) {
-        for(std::uint32_t ci = ci0; ci <= ci1; ++ci) {
+        // ChunkOrdinal stores ci consecutively. Keep metadata lookup in that
+        // order so a wide time plane does not reread every directory block per IL.
+        for(std::uint32_t cx = cx0; cx <= cx1; ++cx) {
             if(cancelled()) return false;
-            for(std::uint32_t cx = cx0; cx <= cx1; ++cx) {
-                for(std::uint32_t pi = 0; pi < info.PagesI(); ++pi) {
-                    const int pageI = static_cast<int>(ci * info.chunkInlines + pi * info.pageInlines);
-                    if(pageI >= iIndex + inlines || pageI + static_cast<int>(info.pageInlines) <= iIndex) {
+            for(std::uint32_t ci = ci0; ci <= ci1; ++ci) {
+                // Bound planning by the requested support, not all pages in an
+                // unusually large chunk declared by an untrusted header.
+                const auto firstPage = [](int begin, std::uint64_t chunkBegin, std::uint32_t page) {
+                    return begin > chunkBegin ? static_cast<std::uint32_t>((begin - chunkBegin) / page) : 0u;
+                };
+                const auto endPage = [](int end, std::uint64_t chunkBegin, std::uint32_t page, std::uint32_t count) {
+                    const auto extent = static_cast<std::uint64_t>(end) - chunkBegin;
+                    return static_cast<std::uint32_t>(std::min<std::uint64_t>(count, extent / page + (extent % page != 0)));
+                };
+                const auto ib = std::uint64_t(ci) * info.chunkInlines;
+                const auto xb = std::uint64_t(cx) * info.chunkXlines;
+                const auto tb = std::uint64_t(ct) * info.chunkSamples;
+                for(std::uint32_t pi = firstPage(iIndex, ib, info.pageInlines);
+                    pi < endPage(iIndex + inlines, ib, info.pageInlines, info.PagesI()); ++pi) {
+                    const auto pageI = std::uint64_t(ci) * info.chunkInlines + std::uint64_t(pi) * info.pageInlines;
+                    if(pageI >= static_cast<std::uint64_t>(iIndex + inlines) || pageI + info.pageInlines <= static_cast<std::uint64_t>(iIndex)) {
                         continue;
                     }
 
-                    for(std::uint32_t px = 0; px < info.PagesX(); ++px) {
-                        const int pageX = static_cast<int>(cx * info.chunkXlines + px * info.pageXlines);
+                    for(std::uint32_t px = firstPage(xIndex, xb, info.pageXlines);
+                        px < endPage(xIndex + xlines, xb, info.pageXlines, info.PagesX()); ++px) {
+                        const auto pageX = std::uint64_t(cx) * info.chunkXlines + std::uint64_t(px) * info.pageXlines;
                         // Bounds are axis INDICES (xIndex), never axis values.
-                        if(pageX >= xIndex + xlines ||
-                           pageX + static_cast<int>(info.pageXlines) <= xIndex) {
+                        if(pageX >= static_cast<std::uint64_t>(xIndex + xlines) ||
+                           pageX + info.pageXlines <= static_cast<std::uint64_t>(xIndex)) {
                             continue;
                         }
 
-                        for(std::uint32_t pt = 0; pt < info.PagesT(); ++pt) {
-                            const int pageT = static_cast<int>(ct * info.chunkSamples + pt * info.pageSamples);
-                            if(pageT >= sampleIndex + samples ||
-                               pageT + static_cast<int>(info.pageSamples) <= sampleIndex) {
+                        for(std::uint32_t pt = firstPage(sampleIndex, tb, info.pageSamples);
+                            pt < endPage(sampleIndex + samples, tb, info.pageSamples, info.PagesT()); ++pt) {
+                            const auto pageT = std::uint64_t(ct) * info.chunkSamples + std::uint64_t(pt) * info.pageSamples;
+                            if(pageT >= static_cast<std::uint64_t>(sampleIndex + samples) ||
+                               pageT + info.pageSamples <= static_cast<std::uint64_t>(sampleIndex)) {
                                 continue;
                             }
 
@@ -942,6 +1172,10 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
                             item.i0 = static_cast<std::uint32_t>(pageI);
                             item.x0 = static_cast<std::uint32_t>(pageX);
                             item.t0 = static_cast<std::uint32_t>(pageT);
+                            if(needed.size() >= kMaxPlannedPages) {
+                                errorMessage = "the requested paged box exceeds the 1M planned-page limit";
+                                return false;
+                            }
                             needed.push_back(item);
                         }
                     }
@@ -955,7 +1189,7 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
         ChunkCacheKey key;
         key.source = impl_->cacheSourceKey;
         key.level = info.lodLevel;
-        key.cs = static_cast<std::uint32_t>((page >> 40) & 0xFFFFu);
+        key.cs = static_cast<std::uint32_t>(page >> 40);
         key.ci = static_cast<std::uint32_t>((page >> 20) & 0xFFFFFu);
         key.cx = static_cast<std::uint32_t>(page & 0xFFFFFu);
         return key;
@@ -964,11 +1198,11 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
     auto scatter = [&](const Needed& item, const std::vector<float>& values) {
         const auto stamp = std::chrono::steady_clock::now();
         const int t0 = std::max(sampleIndex, static_cast<int>(item.t0));
-        const int t1 = std::min(sampleIndex + samples, static_cast<int>(item.t0 + info.pageSamples));
+        const int t1 = static_cast<int>(std::min<std::uint64_t>(sampleIndex + samples, std::uint64_t(item.t0) + info.pageSamples));
         const int x0 = std::max(xIndex, static_cast<int>(item.x0));
-        const int x1 = std::min(xIndex + xlines, static_cast<int>(item.x0 + info.pageXlines));
+        const int x1 = static_cast<int>(std::min<std::uint64_t>(xIndex + xlines, std::uint64_t(item.x0) + info.pageXlines));
         const int i0 = std::max(iIndex, static_cast<int>(item.i0));
-        const int i1 = std::min(iIndex + inlines, static_cast<int>(item.i0 + info.pageInlines));
+        const int i1 = static_cast<int>(std::min<std::uint64_t>(iIndex + inlines, std::uint64_t(item.i0) + info.pageInlines));
         for(int t=t0; t<t1; ++t) for(int x=x0; x<x1; ++x) for(int i=i0; i<i1; ++i) {
             const std::size_t src = (static_cast<std::size_t>(t-item.t0)*info.pageXlines + (x-item.x0))*info.pageInlines + (i-item.i0);
             const std::size_t dst = timeDisplayLayout
@@ -980,23 +1214,23 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
     };
     // Check verified decoded pages BEFORE planning physical I/O. Do not retain
     // all hits outside the byte-budgeted cache: scatter and release each one.
-    std::vector<Needed> misses;
-    misses.reserve(needed.size());
-    for(const Needed& item : needed) {
+    std::size_t missCount = 0;
+    for(Needed& item : needed) {
         if(cancelled()) return false;
         ++impl_->stats.pagesTouched;
+        if(!impl_->Entry(item.page, item.entry, errorMessage)) return false;
         auto cached = impl_->pageCache ? impl_->pageCache->Find(cacheKeyFor(item.page)) : nullptr;
-        if(cached && cached->size()*sizeof(float) == impl_->Entry(item.page).rawBytes) {
+        if(cached && cached->size()*sizeof(float) == item.entry.rawBytes) {
             ++impl_->stats.cacheHits;
             scatter(item, *cached);
         } else {
             if(impl_->pageCache) ++impl_->stats.cacheMisses;
-            misses.push_back(item);
+            needed[missCount++] = item;
         }
     }
-    needed.swap(misses);
+    needed.resize(missCount);
     std::sort(needed.begin(), needed.end(), [&](const Needed& a, const Needed& b) {
-        return impl_->Entry(a.page).offset < impl_->Entry(b.page).offset;
+        return a.entry.offset < b.entry.offset;
     });
     impl_->stats.planMs += MsSince(start) - (impl_->stats.scatterMs - scatterBefore);
     std::vector<unsigned char> rangeBytes;
@@ -1004,12 +1238,12 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
     while(index < needed.size()) {
         if(cancelled()) return false;
         std::size_t end = index+1;
-        const auto rangeStart = impl_->Entry(needed[index].page).offset;
-        auto rangeEnd = rangeStart + impl_->Entry(needed[index].page).storedBytes;
+        const auto rangeStart = needed[index].entry.offset;
+        auto rangeEnd = rangeStart + needed[index].entry.storedBytes;
         // Bound merged buffers, including during full-volume requests.
-        while(end < needed.size() && impl_->Entry(needed[end].page).offset == rangeEnd &&
-              rangeEnd-rangeStart + impl_->Entry(needed[end].page).storedBytes <= (8u<<20)) {
-            rangeEnd += impl_->Entry(needed[end++].page).storedBytes;
+        while(end < needed.size() && needed[end].entry.offset == rangeEnd &&
+              rangeEnd-rangeStart + needed[end].entry.storedBytes <= (8u<<20)) {
+            rangeEnd += needed[end++].entry.storedBytes;
         }
         rangeBytes.resize(static_cast<std::size_t>(rangeEnd-rangeStart));
         const auto ioStart = std::chrono::steady_clock::now();
@@ -1024,7 +1258,7 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
         for(std::size_t k=index; k<end; ++k) {
             if(cancelled()) return false;
             const Needed& item = needed[k];
-            const auto entry = impl_->Entry(item.page);
+            const auto& entry = item.entry;
             const auto* payload = rangeBytes.data() + (entry.offset-rangeStart);
             const auto crcStart = std::chrono::steady_clock::now();
             const auto crc = Fnv1a(payload, entry.storedBytes);
@@ -1056,8 +1290,11 @@ bool PagedWorkspaceReader::ReadBox(int inlineIndex, int xlineIndex, int sampleIn
         }
         index = end;
     }
+    // Cancellation may arrive during the final decode/scatter (or final cache
+    // hit). Do not return a complete result without polling that last boundary.
+    if(cancelled()) return false;
     impl_->stats.wallMs += MsSince(start);
-
+    outputGuard.success = true;
     return true;
 }
 
@@ -1068,6 +1305,7 @@ bool PagedWorkspaceReader::ReadTrace(int inlineIndex, int xlineIndex, std::vecto
 
 bool PagedWorkspaceReader::ReadInlineSlice(int inlineIndex, std::vector<float>& out,
                                            std::string& errorMessage) {
+    out.clear();
     const PagedWorkspaceInfo& info = Info();
     std::vector<float> box;
     if(!ReadBox(inlineIndex, info.xlineAxis.ValueAt(0), 0, 1, info.xlineAxis.count,
@@ -1087,6 +1325,7 @@ bool PagedWorkspaceReader::ReadInlineSlice(int inlineIndex, std::vector<float>& 
 
 bool PagedWorkspaceReader::ReadXlineSlice(int xlineIndex, std::vector<float>& out,
                                           std::string& errorMessage) {
+    out.clear();
     const PagedWorkspaceInfo& info = Info();
     std::vector<float> box;
     if(!ReadBox(info.inlineAxis.ValueAt(0), xlineIndex, 0, info.inlineAxis.count, 1,

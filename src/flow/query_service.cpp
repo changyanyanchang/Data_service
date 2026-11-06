@@ -82,15 +82,6 @@ bool DataService::listSourceData(const std::string& kind,long long sourceId,std:
     if(sourceId<=0){out.clear();e="来源编号无效";return false;}
     return listEntries(impl_->store,kind,0,sourceId,out,e);
 }
-bool DataService::readCurveSlice(long long id,double top,double bottom,bool processed,CurveSlice& out,std::string& e)const{
-    out={};if(std::isfinite(top)&&std::isfinite(bottom)&&top>bottom){e="顶深不能大于底深";return false;}
-    QSqlQuery r;if(!impl_->store.exec("SELECT c.name,c.unit,l.depth_json,l.depths,c.raw_values,c.processed_values,c.quality FROM curves c JOIN log_sets l ON l.id=c.set_id WHERE c.id=?",{id},e,&r))return false;if(!r.next()){e="曲线不存在";return false;}
-    std::vector<double> depths,raw,used;if(!unpack(r.value(3).toByteArray(),depths,e)||!unpack(r.value(4).toByteArray(),raw,e))return false;
-    if(processed&&!r.value(5).isNull()){if(!unpack(r.value(5).toByteArray(),used,e))return false;}else used=raw;
-    auto quality=r.value(6).toByteArray();if(raw.size()!=depths.size()||used.size()!=depths.size()||size_t(quality.size())!=depths.size()){e="曲线数组长度损坏";return false;}
-    out.curveId=id;out.name=s(r.value(0).toString());out.unit=s(r.value(1).toString());out.depthUnit=readDepth(object(r.value(2).toString())).depthUnit;
-    for(size_t i=0;i<depths.size();++i){if((std::isfinite(top)&&(!std::isfinite(depths[i])||depths[i]<top))||(std::isfinite(bottom)&&(!std::isfinite(depths[i])||depths[i]>bottom)))continue;out.depths.push_back(depths[i]);out.rawValues.push_back(raw[i]);out.values.push_back(used[i]);out.quality.push_back(static_cast<unsigned char>(quality[qsizetype(i)]));}return true;
-}
 static IntervalRecord intervalFromRow(const QSqlQuery& r){IntervalRecord v;v.id=r.value(0).toLongLong();v.trackId=r.value(1).toLongLong();auto& a=v.value;a.displayOrder=r.value(2).toInt();a.intervalId=r.value(3).toInt();a.intervalName=s(r.value(4).toString());a.topDepth=value(r.value(5));a.bottomDepth=value(r.value(6));a.topTvd=value(r.value(7));a.bottomTvd=value(r.value(8));a.topTvdss=value(r.value(9));a.bottomTvdss=value(r.value(10));a.faciesType=s(r.value(11).toString());a.topUnconformity=r.value(12).toInt();a.bottomUnconformity=r.value(13).toInt();a.bottomNotPenetrated=r.value(14).toInt();a.properties=readMeasurements(QJsonDocument::fromJson(r.value(15).toString().toUtf8()).array());a.sourceRow=r.value(16).toInt();return v;}
 bool DataService::readIntervals(long long track,double top,double bottom,std::vector<IntervalRecord>& out,std::string& e)const{
     out.clear();if(std::isfinite(top)&&std::isfinite(bottom)&&top>bottom){e="深度范围错误";return false;}
@@ -100,7 +91,7 @@ static std::string numericText(double v){return std::isfinite(v)?s(QString::numb
 bool DataService::readTable(const std::string& kind,long long id,long long offset,int limit,DataTable& out,std::string& e)const{
     out={};if(offset<0||limit<1||limit>5000){e="分页范围错误（每页1到5000行）";return false;}auto& store=impl_->store;
     if(kind=="curves"){
-        CurveSlice curve;if(!readCurveSlice(id,Missing,Missing,true,curve,e))return false;out.columns={"sampleIndex","深度","原始值","处理值","质量标记"};out.totalRows=static_cast<long long>(curve.depths.size());for(long long i=offset;i<std::min(out.totalRows,offset+limit);++i)out.rows.push_back({std::to_string(i),numericText(curve.depths[size_t(i)]),numericText(curve.rawValues[size_t(i)]),numericText(curve.values[size_t(i)]),std::to_string(curve.quality[size_t(i)])});return true;
+        return readCurveTableWindow(id,offset,limit,out,e);
     }
     if(kind=="tables"){
         QSqlQuery info;if(!store.exec("SELECT rows,columns FROM source_tables WHERE id=?",{id},e,&info)||!info.next()){if(e.empty())e="来源工作表不存在";return false;}
