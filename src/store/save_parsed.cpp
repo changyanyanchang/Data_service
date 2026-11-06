@@ -1,4 +1,5 @@
 #include "project_store.h"
+#include "curve_windows.h"
 #include <QSqlError>
 #include <QJsonDocument>
 
@@ -21,6 +22,7 @@ QJsonObject timeDepthJson(const TimeDepthTable& td){
 }
 
 bool ProjectStore::saveParsed(long long sourceId,const ParsedFile& file,const ParseOptions& options,std::string& e,const CancelCheck& cancelled,bool inputNullsResolved){
+    if(!ensureCurveWindowSchema(*this,e))return false;
     auto insert=[&](const QString& sql,const QVariantList& args,long long& id){QSqlQuery r;if(!exec(sql,args,e,&r))return false;id=r.lastInsertId().toLongLong();return true;};
     auto insertRows=[&](QSqlQuery& query,const QVector<QVariantList>& columns){
         if(columns.isEmpty()||columns.front().isEmpty())return true;
@@ -56,6 +58,7 @@ bool ProjectStore::saveParsed(long long sourceId,const ParsedFile& file,const Pa
             auto n=log.samplingAxis.depthValues.size();
             if((!log.samplingAxis.tvdValues.empty()&&log.samplingAxis.tvdValues.size()!=n)||(!log.samplingAxis.tvdssValues.empty()&&log.samplingAxis.tvdssValues.size()!=n)){e="附加深度轴长度不一致";return false;}
             long long sid;if(!insert("INSERT INTO log_sets(well_id,source_id,name,depth_json,depths,tvd,tvdss,step,sample_count,sheet) VALUES(?,?,?,?,?,?,?,?,?,?)",{wid,sourceId,q(log.logSetName),json(depthJson(log.depthInfo)),pack(log.samplingAxis.depthValues),pack(log.samplingAxis.tvdValues),pack(log.samplingAxis.tvdssValues),number(log.samplingAxis.sampleStep),qlonglong(n),q(log.sourceSheet)},sid))return false;
+            if(!writeCurveAxisWindows(*this,sid,log.samplingAxis,e,cancelled))return false;
             for(const auto& curve:log.logCurves){
                 if(curve.sampleValues.size()!=n){e="曲线与深度轴长度不一致";return false;}
                 std::vector<double> effective=curve.sampleValues;
@@ -69,6 +72,7 @@ bool ProjectStore::saveParsed(long long sourceId,const ParsedFile& file,const Pa
                 QJsonArray declared;for(double v:file.declaredNullValues)declared.append(v);
                 QJsonObject rules{{"declared_nulls",declared}};if(rule){rules["curve"]=q(rule->curveType);rules["unit"]=q(rule->unit);rules["rangeApplied"]=rangeValid;rules["checkMinimum"]=rule->checkMinimum;rules["minimum"]=rule->minimum;rules["checkMaximum"]=rule->checkMaximum;rules["maximum"]=rule->maximum;rules["replace"]=rule->replaceInvalidWithMissing;QJsonArray configured;for(double v:rule->nullValues)configured.append(v);rules["nulls"]=configured;}
                 long long cid;if(!insert("INSERT INTO curves(set_id,name,unit,description,raw_values,processed_values,quality,rule_json) VALUES(?,?,?,?,?,?,?,?)",{sid,q(curve.curveName),q(curve.curveUnit),q(curve.description),pack(curve.sampleValues),changed?QVariant(pack(effective)):QVariant(),quality,json(rules)},cid))return false;
+                if(!writeCurveValueWindows(*this,cid,sid,curve.sampleValues,changed?&effective:nullptr,quality,e,cancelled))return false;
             }
         }
         for(const auto& track:well.wellbore.intervalTracks){

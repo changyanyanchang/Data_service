@@ -70,14 +70,15 @@ bool DataService::captureCorrelationInputs(const CorrelationInputRequest& reques
         if(stopped(cancelled,error))return false;if(selection.wellId<=0||selection.curveId<=0||!wells.insert(selection.wellId).second){error="井或曲线 ID 无效，或重复选择井";return false;}
         CorrelationWellInput input;input.wellId=selection.wellId;input.curveId=selection.curveId;input.timeDepthId=selection.timeDepthId;input.trajectoryId=selection.trajectoryId;input.intervalTrackId=selection.intervalTrackId;input.processed=selection.processed;input.confirmedVertical=selection.confirmedVertical;
         DataEntry curve;if(!belongs(*this,"curves",selection.curveId,selection.wellId,curve,error)||!readWellInfo(selection.wellId,input.well,error))return false;input.logSetId=curve.parentId;QJsonArray refs;refs.append(ref(curve));
-        LogSet logs;if(!readLogSet(curve.parentId,selection.processed,logs,error))return false;input.depthInfo=logs.depthInfo;
+        CurveWindowResult window;CurveReadOptions readOptions;readOptions.cancelled=cancelled;
+        readOptions.maxSamples=std::min(1000000LL,16000000-totalValues);
+        if(!readCurveDepthWindow(selection.curveId,request.firstDepth,request.lastDepth,selection.processed,window,error,readOptions))return false;
+        input.depthInfo=window.depthInfo;
         QSqlQuery defaults;if(!st.exec("SELECT depth_json FROM wells WHERE id=?",{selection.wellId},error,&defaults)||!defaults.next()){if(error.empty())error="井默认深度约定不可读取";return false;}input.surveyDepthInfo=readDepth(object(defaults.value(0).toString()));defaults.finish();
-        CurveSlice slice;if(!readCurveSlice(selection.curveId,request.firstDepth,request.lastDepth,selection.processed,slice,error))return false;
+        auto slice=std::move(window.curve);
         totalValues+=static_cast<long long>(slice.depths.size());if(totalValues>16000000){error="输入曲线超过本次1600万样点预算，请缩小井组或深度区间";return false;}
         if(slice.depths.empty()){error="所选曲线在请求区间没有样点";return false;}
-        const auto& axis=logs.samplingAxis;
-        if((!axis.tvdValues.empty()&&axis.tvdValues.size()!=axis.depthValues.size())||(!axis.tvdssValues.empty()&&axis.tvdssValues.size()!=axis.depthValues.size())){error="原始TVD/TVDSS与测井主轴长度不一致";return false;}
-        for(size_t i=0;i<axis.depthValues.size();++i){const auto d=axis.depthValues[i];if((std::isfinite(request.firstDepth)&&(!std::isfinite(d)||d<request.firstDepth))||(std::isfinite(request.lastDepth)&&(!std::isfinite(d)||d>request.lastDepth)))continue;if(!axis.tvdValues.empty())input.logTvdValues.push_back(axis.tvdValues[i]);if(!axis.tvdssValues.empty())input.logTvdssValues.push_back(axis.tvdssValues[i]);}
+        input.logTvdValues=std::move(window.tvdValues);input.logTvdssValues=std::move(window.tvdssValues);
         input.rawLogValues=slice.rawValues;input.sourceQuality=slice.quality;input.log.id="source-curve-"+std::to_string(slice.curveId);input.log.name=slice.name;input.log.kind="SOURCE_LOG";input.log.unit=slice.unit;input.log.axisKind=input.depthInfo.depthType;input.log.axisUnit=input.depthInfo.depthUnit;input.log.axis=slice.depths;input.log.values=slice.values;input.log.quality.resize(slice.values.size(),0);
         for(size_t i=0;i<input.log.values.size();++i){if(!std::isfinite(input.log.axis[i])){error="输入曲线含无效深度；请先核对源资料";return false;}if((slice.quality[i]&1)||!std::isfinite(slice.values[i])){input.log.values[i]=Missing;input.log.quality[i]=1;}}
         if(input.depthInfo.depthType.empty()||input.depthInfo.depthUnit.empty())input.warnings.push_back("曲线深度类型或单位尚未确认");

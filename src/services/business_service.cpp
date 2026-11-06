@@ -5,11 +5,18 @@
 #include <set>
 namespace paleo::data {
 bool DataService::prepareWellFeatures(long long wellId,const std::vector<long long>& ids,double top,double bottom,bool processed,WellFeatureTable& result,std::string& error)const{
+    return prepareWellFeatures(wellId,ids,top,bottom,processed,result,error,CurveReadOptions{});
+}
+bool DataService::prepareWellFeatures(long long wellId,const std::vector<long long>& ids,double top,double bottom,bool processed,
+    WellFeatureTable& result,std::string& error,const CurveReadOptions& options)const{
     result={};if(wellId<=0||ids.empty()||ids.size()>64){error="特征表需要一口井与1到64条曲线";return false;}
     std::vector<DataEntry> entries;if(!listData("curves",wellId,entries,error))return false;
     WellFeatureTable table;table.wellId=wellId;long long parent=0;std::set<long long> seen;
+    long long consumed=0;
     for(auto id:ids){auto entry=std::find_if(entries.begin(),entries.end(),[&](const auto& v){return v.id==id;});if(entry==entries.end()||!seen.insert(id).second){error="曲线重复或不属于指定井";return false;}
-        CurveSlice curve;if(!readCurveSlice(id,top,bottom,processed,curve,error))return false;
+        auto budget=options;budget.maxReadBytes-=consumed;budget.maxSamples=std::min(budget.maxSamples,8000000LL/static_cast<long long>(ids.size()));
+        CurveReadStats usage;CurveSlice curve;if(!readCurveSlice(id,top,bottom,processed,curve,error,budget,&usage))return false;
+        consumed+=usage.payloadBytesRead;
         for(double d:curve.depths)if(!std::isfinite(d)){error="特征表中存在未知深度，先核对深度轴";return false;}
         if(table.columns.empty()){table.depths=std::move(curve.depths);table.depthUnit=curve.depthUnit;parent=entry->parentId;}
         else if(curve.depths!=table.depths||curve.depthUnit!=table.depthUnit||entry->parentId!=parent){error="一期特征表仅组合同一曲线组内共享采样轴的曲线；不同组的深度基准与采样需要显式处理";return false;}

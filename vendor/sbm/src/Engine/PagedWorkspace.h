@@ -138,11 +138,18 @@ public:
         std::uint64_t cacheMisses = 0;
         double wallMs = 0.0;
         double planMs = 0.0, readMs = 0.0, checksumMs = 0.0, decodeMs = 0.0, scatterMs = 0.0;
+        // Existing readBytes/readCalls describe payload I/O. Directory/bitmap
+        // I/O is separate; cache byte counters count owned buffers, not RSS.
+        std::uint64_t headerReadBytes = 0;
+        std::uint64_t directoryReadBytes = 0, directoryReadCalls = 0;
+        std::uint64_t directoryCacheHits = 0, directoryCacheMisses = 0;
+        std::uint64_t directoryCacheBytes = 0, directoryCachePeakBytes = 0;
+        std::uint64_t directoryCacheBudgetBytes = 0;
     };
 
-    // metadataOnly reads the versioned header but does not allocate/read the
-    // potentially gigabyte-scale page directory. It is used for LOD discovery
-    // and first-open selection before the chosen level is opened normally.
+    // Both modes read only the versioned header at open. Normal reads fetch
+    // directory/bitmap blocks on demand; metadataOnly additionally forbids
+    // payload access and permits a header whose directories are not yet present.
     bool Open(const std::filesystem::path& path, std::string& errorMessage,
               bool metadataOnly = false);
     const PagedWorkspaceInfo& Info() const;
@@ -150,7 +157,8 @@ public:
     void ResetReaderStats();
 
     // Exact axis box read; NaN outside the covered area. Fails when a requested
-    // coordinate is not an exact axis element.
+    // coordinate is not an exact axis element. At most 64M output floats,
+    // 1M planned pages and 64MiB per decoded page; failure clears the output.
     bool ReadBox(int inlineIndex, int xlineIndex, int sampleIndex,
                  int inlines, int xlines, int samples,
                  std::vector<float>& out, std::string& errorMessage, CancelToken* cancel = nullptr,
@@ -170,9 +178,16 @@ public:
     std::shared_ptr<ChunkCache> PageCacheHandle() const;
     std::uint64_t CacheSourceKey() const;
 
+    // Shared byte-bounded LRU for page-directory and completion-bitmap blocks.
+    // Retained byte buffers default to 4MiB; 0 disables retention/read-ahead.
+    // Configure before or after Open. Reader/Dataset handles remain single-thread.
+    void SetDirectoryCacheBudget(std::size_t bytes);
+    std::size_t DirectoryCacheBudget() const;
+
 private:
     struct Impl;
     std::shared_ptr<Impl> impl_;
+    std::size_t directoryCacheBudget_ = 4u * 1024u * 1024u;
 };
 
 // Full engine backend over a paged workspace.
