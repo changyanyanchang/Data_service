@@ -68,6 +68,29 @@ void exercise(const QString& project,const QString& source) {
     require(service.confirmTimeDepthSemantics(second.id,"ms","TWT","updated datum",false,error),error);
     require(!service.readTimeDepthAtRevision(second.id,second.revision,value,error)&&value.depthTimePairs.empty(),"Changed semantics must reject old revision");
     second=describe(service,DataObjectKind::TimeDepth,second.id);require(second.revisionKnown,"Changed object still has revision");
+    const auto sibling=describe(service,DataObjectKind::TimeDepth,first.id);
+    const auto raw=sql(project,"SELECT json_extract(payload,'$.points') FROM well_objects WHERE id=?",{second.id});
+    DataObjectDescriptor updated;
+    require(!service.confirmTimeDepthSemanticsAtRevision(second.id,second.revision," ","ms","TWT","datum",true,updated,error)&&updated.id==0,
+        "Exact confirmation needs an explicit MD datum");
+    sql(project,"CREATE TRIGGER reject_exact_semantics BEFORE INSERT ON changes WHEN NEW.kind='time_depth' BEGIN SELECT RAISE(ABORT,'exact semantics failure'); END");
+    require(!service.confirmTimeDepthSemanticsAtRevision(second.id,second.revision,"KB","ms","TWT","datum",true,updated,error)&&updated.id==0,
+        "Exact confirmation audit failure must return no updated object");
+    require(describe(service,DataObjectKind::TimeDepth,second.id).revision==second.revision,"Failed exact edit must roll back the revision");
+    sql(project,"DROP TRIGGER reject_exact_semantics");
+    require(service.confirmTimeDepthSemanticsAtRevision(second.id,second.revision," KB ","ms","TWT","datum",true,updated,error),error);
+    require(updated.revision!=second.revision&&updated.id==second.id&&updated.sourceId==second.sourceId,"Successful exact confirmation mints only the selected token");
+    require(describe(service,DataObjectKind::TimeDepth,first.id).revision==sibling.revision,"Exact confirmation leaves same-source sibling current");
+    require(sql(project,"SELECT json_extract(payload,'$.points') FROM well_objects WHERE id=?",{second.id})==raw,"Original numeric JSON points remain unchanged");
+    require(service.readTimeDepthAtRevision(updated.id,updated.revision,value,error),error);
+    require(value.depthInfo.mdReference=="KB"&&value.timeReference=="datum"&&value.timeSign=="negated"&&
+        value.depthTimePairs.front().depthValue==100&&value.depthTimePairs.front().timeValue==-300,"Exact declaration changes only the interpreted sign");
+    const auto revised=updated;
+    require(!service.confirmTimeDepthSemanticsAtRevision(second.id,second.revision,"RKB","ms","TWT","datum",true,updated,error)&&updated.id==0,
+        "Old revision cannot overwrite exact confirmation");
+    require(service.confirmTimeDepthSemanticsAtRevision(revised.id,revised.revision,"KB","ms","TWT","datum",true,updated,error),error);
+    require(updated.revision==revised.revision,"Repeated exact semantics do not bump revision");
+    second=updated;
     sql(project,"UPDATE well_objects SET name='display only' WHERE id=?",{second.id});
     require(describe(service,DataObjectKind::TimeDepth,second.id).revision==second.revision,"Relation display names are not semantic identity");
     const auto trackBefore=describe(service,DataObjectKind::IntervalTrack,tracks[0].id);
@@ -107,6 +130,8 @@ void exercise(const QString& project,const QString& source) {
     require(describe(service,DataObjectKind::TimeDepth,first.id).revisionKnown,"Descriptor must not deserialize payload");
     sql(project,"UPDATE well_objects SET payload=zeroblob(67108865) WHERE id=?",{first.id});first=describe(service,DataObjectKind::TimeDepth,first.id);
     require(!service.readTimeDepthAtRevision(first.id,first.revision,value,error)&&value.depthTimePairs.empty(),"64 MiB hard payload budget must apply before JSON loading");
+    require(!service.confirmTimeDepthSemanticsAtRevision(first.id,first.revision,"KB","ms","TWT","datum",false,updated,error)&&updated.id==0,
+        "Exact confirmation enforces the payload budget before JSON processing");
     sql(project,"DELETE FROM well_objects WHERE id=?",{first.id});
     DataObjectDescriptor missing;require(!service.describeDataObject(DataObjectKind::TimeDepth,first.id,missing,error)&&missing.id==0,"Deleted object cannot resolve");
     sql(project,"INSERT INTO well_objects(id,well_id,source_id,kind,name,payload) VALUES(?,?,?,'time_depth','reused','{}')",{first.id,first.wellId,first.sourceId});
