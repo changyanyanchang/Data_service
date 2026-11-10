@@ -69,7 +69,8 @@ bool DataService::captureCorrelationInputs(const CorrelationInputRequest& reques
     for(const auto& selection:request.wells){
         if(stopped(cancelled,error))return false;if(selection.wellId<=0||selection.curveId<=0||!wells.insert(selection.wellId).second){error="井或曲线 ID 无效，或重复选择井";return false;}
         CorrelationWellInput input;input.wellId=selection.wellId;input.curveId=selection.curveId;input.timeDepthId=selection.timeDepthId;input.trajectoryId=selection.trajectoryId;input.intervalTrackId=selection.intervalTrackId;input.processed=selection.processed;input.confirmedVertical=selection.confirmedVertical;
-        DataEntry curve;if(!belongs(*this,"curves",selection.curveId,selection.wellId,curve,error)||!readWellInfo(selection.wellId,input.well,error))return false;input.logSetId=curve.parentId;QJsonArray refs;refs.append(ref(curve));
+        // 约定解析只看来源已声明的 CRS；工区默认 EPSG:32650 不得被当成来源声明。
+        DataEntry curve;if(!belongs(*this,"curves",selection.curveId,selection.wellId,curve,error)||!readWellInfo(selection.wellId,input.well,error,false))return false;input.logSetId=curve.parentId;QJsonArray refs;refs.append(ref(curve));
         CurveWindowResult window;CurveReadOptions readOptions;readOptions.cancelled=cancelled;
         readOptions.maxSamples=std::min(1000000LL,16000000-totalValues);
         if(!readCurveDepthWindow(selection.curveId,request.firstDepth,request.lastDepth,selection.processed,window,error,readOptions))return false;
@@ -110,7 +111,7 @@ bool DataService::captureCorrelationInputs(const CorrelationInputRequest& reques
     for(const auto& selection:request.horizons){
         if(stopped(cancelled,error))return false;if(selection.resourceId<=0||selection.role.empty()||!roles.insert(selection.role).second){error="层位资源 ID 或角色无效，或角色重复";return false;}
         CorrelationHorizon horizon;horizon.resourceId=selection.resourceId;horizon.role=selection.role;
-        if(!readHorizon(selection.resourceId,0,1,horizon.surface,error))return false;horizon.surface.points.clear();QJsonArray regions;
+        if(!readHorizon(selection.resourceId,0,1,horizon.surface,error,false))return false;horizon.surface.points.clear();QJsonArray regions;
         std::set<std::tuple<int,int,double,double,std::uint64_t>> included;
         for(auto& well:snapshot.wells){
             if(stopped(cancelled,error))return false;
