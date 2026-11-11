@@ -24,18 +24,28 @@ QJsonObject timeDepthJson(const TimeDepthTable& td){
 bool ProjectStore::saveParsed(long long sourceId,const ParsedFile& file,const ParseOptions& options,std::string& e,const CancelCheck& cancelled,bool inputNullsResolved){
     if(!ensureCurveWindowSchema(*this,e))return false;
     auto insert=[&](const QString& sql,const QVariantList& args,long long& id){QSqlQuery r;if(!exec(sql,args,e,&r))return false;id=r.lastInsertId().toLongLong();return true;};
-    auto insertRows=[&](QSqlQuery& query,const QVector<QVariantList>& columns){
+    auto insertRows=[&](const QString& statement,const QVector<QVariantList>& columns){
         if(columns.isEmpty()||columns.front().isEmpty())return true;
         const auto rows=columns.front().size();
         for(const auto& column:columns)if(column.size()!=rows){e="批量写入列长度不一致";return false;}
-        constexpr qsizetype chunkSize=256;
-        const auto sql=query.lastQuery();
+        // QSQLite implements execBatch as individual executions. One bounded
+        // VALUES statement amortizes that work, without disabling row triggers.
+        // Stay below SQLite's legacy 999-variable limit as well as the existing
+        // 256-row cancellation interval.
+        const auto chunkSize=std::min<qsizetype>(256,900/columns.size());
+        if(chunkSize<1){e="批量写入列数超出参数预算";return false;}
+        const auto tuple="("+QStringList(columns.size(),"?").join(',')+")";
+        QSqlQuery query(db);qsizetype preparedRows=0;
         for(qsizetype offset=0;offset<rows;offset+=chunkSize){
             if(cancelled&&cancelled()){e="已取消";return false;}
-            for(const auto& column:columns)query.addBindValue(column.mid(offset,chunkSize));
-            if(!query.execBatch()){e=s(query.lastError().text());return false;}
-            query.clear();
-            if(offset+chunkSize<rows&&!query.prepare(sql)){e=s(query.lastError().text());return false;}
+            const auto count=std::min(chunkSize,rows-offset);
+            if(count!=preparedRows){
+                if(!query.prepare(statement+" VALUES "+QStringList(count,tuple).join(','))){e=s(query.lastError().text());return false;}
+                preparedRows=count;
+            }
+            int binding=0;
+            for(qsizetype row=0;row<count;++row)for(const auto& column:columns)query.bindValue(binding++,column[offset+row]);
+            if(!query.exec()){e=s(query.lastError().text());return false;}
         }
         return true;
     };
@@ -77,18 +87,18 @@ bool ProjectStore::saveParsed(long long sourceId,const ParsedFile& file,const Pa
         }
         for(const auto& track:well.wellbore.intervalTracks){
             long long tid;if(!insert("INSERT INTO tracks(well_id,source_id,name,type,depth_json,sheet) VALUES(?,?,?,?,?,?)",{wid,sourceId,q(track.trackName),q(track.trackType),json(depthJson(track.depthInfo)),q(track.sourceSheet)},tid))return false;
-            QSqlQuery query(db);if(!query.prepare("INSERT INTO intervals(track_id,ordinal,original_id,name,top,bottom,top_tvd,bottom_tvd,top_ss,bottom_ss,facies,top_unc,bottom_unc,not_penetrated,properties,source_row) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")){e=s(query.lastError().text());return false;}
+            const QString statement="INSERT INTO intervals(track_id,ordinal,original_id,name,top,bottom,top_tvd,bottom_tvd,top_ss,bottom_ss,facies,top_unc,bottom_unc,not_penetrated,properties,source_row)";
             QVector<QVariantList> columns(16);int order=0;
             for(const auto& v:track.intervals){int c=0;columns[c++]<<tid;columns[c++]<<order++;columns[c++]<<v.intervalId;columns[c++]<<q(v.intervalName);columns[c++]<<number(v.topDepth);columns[c++]<<number(v.bottomDepth);columns[c++]<<number(v.topTvd);columns[c++]<<number(v.bottomTvd);columns[c++]<<number(v.topTvdss);columns[c++]<<number(v.bottomTvdss);columns[c++]<<q(v.faciesType);columns[c++]<<v.topUnconformity;columns[c++]<<v.bottomUnconformity;columns[c++]<<v.bottomNotPenetrated;columns[c++]<<json(measurementsJson(v.properties));columns[c++]<<v.sourceRow;}
-            if(!insertRows(query,columns))return false;
+            if(!insertRows(statement,columns))return false;
         }
         for(const auto& table:well.wellbore.sampleTables){
             long long tid;if(!insert("INSERT INTO sample_tables(well_id,source_id,name,sheet) VALUES(?,?,?,?)",{wid,sourceId,q(table.tableName),q(table.sourceSheet)},tid))return false;
             for(const auto& sample:table.samples){long long sid;if(!insert("INSERT INTO samples(table_id,number,type,source_range,top,bottom) VALUES(?,?,?,?,?,?)",{tid,q(sample.sampleNumber),q(sample.sampleType),q(sample.sourceRange),number(sample.topDepth),number(sample.bottomDepth)},sid))return false;
-                QSqlQuery query(db);if(!query.prepare("INSERT INTO measurements(sample_id,name,unit,value,original_text) VALUES(?,?,?,?,?)")){e=s(query.lastError().text());return false;}
+                const QString statement="INSERT INTO measurements(sample_id,name,unit,value,original_text)";
                 QVector<QVariantList> columns(5);
                 for(const auto& m:sample.measurements){int c=0;columns[c++]<<sid;columns[c++]<<q(m.measurementName);columns[c++]<<q(m.measurementUnit);columns[c++]<<number(m.numericValue);columns[c++]<<q(m.originalText);}
-                if(!insertRows(query,columns))return false;
+                if(!insertRows(statement,columns))return false;
             }
         }
         for(const auto& trajectory:well.wellbore.trajectories){QJsonArray points;for(auto& p:trajectory.surveyPoints)points.append(QJsonObject{{"md",QJsonValue::fromVariant(number(p.measuredDepth))},{"inclination",QJsonValue::fromVariant(number(p.inclinationDegrees))},{"azimuth",QJsonValue::fromVariant(number(p.azimuthDegrees))}});if(!exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(?,?,?,?,?)",{wid,sourceId,"trajectories",q(trajectory.surveyName),json(QJsonObject{{"azimuthReference",q(trajectory.azimuthReference)},{"points",points}})},e))return false;}
@@ -101,18 +111,18 @@ bool ProjectStore::saveParsed(long long sourceId,const ParsedFile& file,const Pa
         if(!exec("INSERT INTO volumes(source_id,name,path,format,amplitude_unit,geometry,sampling) VALUES(?,?,?,?,?,?,?)",{sourceId,q(v.volumeName),q(v.dataFile),q(v.fileFormat),q(v.amplitudeUnit),json(g),json(sampling)},e))return false;}
     for(const auto& td:file.unassignedTimeDepth){if(!exec("INSERT INTO well_objects(well_id,source_id,kind,name,payload) VALUES(NULL,?,?,?,?)",{sourceId,"time_depth",q(td.relationName),json(timeDepthJson(td))},e))return false;}
     for(const auto& h:file.horizons){long long hid;if(!insert("INSERT INTO horizons(source_id,name,volume_id,crs,unit,time_unit,time_type,time_reference) VALUES(?,?,?,?,?,?,?,?)",{sourceId,q(h.horizonName),h.parentVolumeId?QVariant(h.parentVolumeId):QVariant(),q(h.coordinateSystem),q(h.coordinateUnit),q(h.timeUnit),q(h.timeType),q(h.timeReference)},hid))return false;
-        QSqlQuery query(db);if(!query.prepare("INSERT INTO horizon_points(horizon_id,seq,inline_no,crossline_no,x,y,z) VALUES(?,?,?,?,?,?,?)")){e=s(query.lastError().text());return false;}
+        const QString statement="INSERT INTO horizon_points(horizon_id,seq,inline_no,crossline_no,x,y,z)";
         QVector<QVariantList> columns(7);int seq=0;
         for(const auto& p:h.points){int c=0;columns[c++]<<hid;columns[c++]<<seq++;columns[c++]<<p.inlineNumber;columns[c++]<<p.crosslineNumber;columns[c++]<<number(p.x);columns[c++]<<number(p.y);columns[c++]<<number(p.zTime);}
-        if(!insertRows(query,columns))return false;
+        if(!insertRows(statement,columns))return false;
     }
     for(const auto& m:file.maps){QJsonArray strata;for(auto& stratum:m.stratigraphicNames)strata.append(q(stratum));if(!exec("INSERT INTO maps(source_id,name,type,area,strata,image_path,source_file,source_location,crs,geo_status,geo_file,description) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",{sourceId,q(m.mapName),q(m.mapType),q(m.areaName),json(strata),q(m.imagePath),q(m.sourceFile),q(m.sourceLocation),q(m.coordinateSystem),m.georeferenceStatus,q(m.georeferenceFile),q(m.description)},e))return false;}
     for(const auto& t:file.sourceTables){
         long long tid;if(!insert("INSERT INTO source_tables(source_id,name,rows,columns) VALUES(?,?,?,?)",{sourceId,q(t.sheetName),t.rowCount,t.columnCount},tid))return false;
-        QSqlQuery query(db);if(!query.prepare("INSERT INTO source_cells(table_id,row_num,col_num,text) VALUES(?,?,?,?)")){e=s(query.lastError().text());return false;}
+        const QString statement="INSERT INTO source_cells(table_id,row_num,col_num,text)";
         QVector<QVariantList> columns(4);
         for(const auto& cell:t.cells){int c=0;columns[c++]<<tid;columns[c++]<<cell.row;columns[c++]<<cell.column;columns[c++]<<q(cell.text);}
-        if(!insertRows(query,columns))return false;
+        if(!insertRows(statement,columns))return false;
     }
     return saveParsedCoordinateSystems(sourceId,file,e);
 }
