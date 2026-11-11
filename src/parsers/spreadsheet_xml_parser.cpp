@@ -7,6 +7,7 @@
 #include <QHash>
 #include <QSet>
 #include <QXmlStreamReader>
+#include <QStringView>
 #include <QStringConverter>
 #include <QRegularExpression>
 #include <QLocale>
@@ -112,6 +113,8 @@ double number(const QString& value,bool* invalid=nullptr){
 int flag(const QString& value){const QString t=value.trimmed().toLower();if(t=="true"||t=="1"||t==QStringLiteral("是"))return 1;if(t=="false"||t=="0"||t==QStringLiteral("否"))return 0;return -1;}
 struct Sheet {
     QString name;QStringList header;SourceTable source;QString kind;int row=0,dataRows=0;
+    // Only normalization is cached; every row still checks ownership and retains its original name.
+    QString nameWell,previousRawWell,previousCanonicalWell;bool hasPreviousWell=false;
     int well=-1,depth=-1,tvd=-1,tvdss=-1,track=-1,layer=-1,top=-1,bottom=-1,topTvd=-1,bottomTvd=-1,topSs=-1,bottomSs=-1,nameCol=-1;
     int facies=-1,topUnc=-1,bottomUnc=-1,notPen=-1,image=-1,imageDir=-1;
     std::vector<int> curves;std::map<int,int> logSets;std::map<std::pair<int,QString>,int> tracks,photoTracks;
@@ -160,8 +163,14 @@ ParsedFile parseSpreadsheetXmlFile(const std::string& path,const ParseOptions& o
         ++sh.dataRows;sourceRow(sh,row);++rows;
         if(sh.kind.isEmpty())return;
         for(int c=sh.header.size();c<row.size();++c)if(!row[c].trimmed().isEmpty())issue(out,"XML_EXTRA_COLUMN","数据列超出表头；原文件保留，请补全字段映射",sh.name,sh.row,false,row[c]);
-        const QString originalWell=cell(row,sh.well).trimmed();QString name=overrideName.isEmpty()?q(canonicalWellName(s(originalWell))):overrideName;
-        const QString sheetWell=wellToken(sh.name);if(name.isEmpty())name=!fileWell.isEmpty()?fileWell:sheetWell;
+        const QString originalWell=cell(row,sh.well).trimmed();QString name=overrideName;
+        if(name.isEmpty()){
+            if(!sh.hasPreviousWell||originalWell!=sh.previousRawWell){
+                sh.previousRawWell=originalWell;sh.previousCanonicalWell=q(canonicalWellName(s(originalWell)));sh.hasPreviousWell=true;
+            }
+            name=sh.previousCanonicalWell;
+        }
+        const QString& sheetWell=sh.nameWell;if(name.isEmpty())name=!fileWell.isEmpty()?fileWell:sheetWell;
         if(name.isEmpty()||(overrideName.isEmpty()&&((!fileWell.isEmpty()&&name!=fileWell)||(!sheetWell.isEmpty()&&name!=sheetWell)))){
             if(!conflict)issue(out,"WELL_NAME_CONFLICT","文件名、工作表或数据行的井号不一致；请指定正确归属后重新导入",sh.name,sh.row,true,originalWell+" / "+fileWell+" / "+sheetWell);
             conflict=true;return;
@@ -217,26 +226,26 @@ ParsedFile parseSpreadsheetXmlFile(const std::string& path,const ParseOptions& o
         const auto token=xml.readNext();if(token==QXmlStreamReader::Invalid)break;
         if(token==QXmlStreamReader::DTD)return fail(std::move(out),"不支持包含 DTD 的 SpreadsheetML");
         if(token==QXmlStreamReader::StartElement){
-            const QString name=xml.name().toString();const bool ss=xml.namespaceUri()==spreadsheetNs;
-            if(!rootSeen){rootSeen=true;if(name!="Workbook"||!ss)return fail(std::move(out),"不是 Excel 2003 SpreadsheetML Workbook");}
+            const QStringView name=xml.name();const bool ss=xml.namespaceUri()==spreadsheetNs;
+            if(!rootSeen){rootSeen=true;if(name!=u"Workbook"||!ss)return fail(std::move(out),"不是 Excel 2003 SpreadsheetML Workbook");}
             if(inCell&&dataDepth>0){++dataDepth;continue;}
-            if(ss&&name=="Worksheet"){sh={};sh.name=attr(xml.attributes(),"Name");sh.source.sheetName=s(sh.name);inSheet=true;}
-            else if(ss&&inSheet&&name=="Table")inTable=true;
-            else if(ss&&inTable&&name=="Row"){
+            if(ss&&name==u"Worksheet"){sh={};sh.name=attr(xml.attributes(),"Name");sh.nameWell=wellToken(sh.name);sh.source.sheetName=s(sh.name);inSheet=true;}
+            else if(ss&&inSheet&&name==u"Table")inTable=true;
+            else if(ss&&inTable&&name==u"Row"){
                 const QString index=attr(xml.attributes(),"Index");bool ok=true;const int next=index.isEmpty()?sh.row+1:index.toInt(&ok);if(!ok||next<=sh.row)return fail(std::move(out),"工作表行号必须严格递增且在整数范围内");sh.row=next;row.clear();column=0;inRow=true;
                 if(cancelled&&cancelled())return fail(std::move(out),"解析已取消");
-            }else if(ss&&inRow&&name=="Cell"){
+            }else if(ss&&inRow&&name==u"Cell"){
                 const QString index=attr(xml.attributes(),"Index");bool ok=true;const int next=index.isEmpty()?column+1:index.toInt(&ok);if(!ok||next<=column||next>16384)return fail(std::move(out),"单元格列号无效或超出 16384 列");column=next;mergeAcross=attr(xml.attributes(),"MergeAcross").toInt();if(mergeAcross<0||column+mergeAcross>16384)return fail(std::move(out),"合并单元格范围无效");
                 if(!attr(xml.attributes(),"Formula").isEmpty())sh.formula=true;inCell=true;value.clear();
-            }else if(ss&&inCell&&name=="Data")dataDepth=1;
+            }else if(ss&&inCell&&name==u"Data")dataDepth=1;
         }else if(token==QXmlStreamReader::Characters&&dataDepth>0)value+=xml.text();
         else if(token==QXmlStreamReader::EndElement){
-            const QString name=xml.name().toString();const bool ss=xml.namespaceUri()==spreadsheetNs;
+            const QStringView name=xml.name();const bool ss=xml.namespaceUri()==spreadsheetNs;
             if(dataDepth>0){--dataDepth;continue;}
-            if(ss&&name=="Cell"&&inCell){while(row.size()<column+mergeAcross)row.append(QString());row[column-1]=value;column+=mergeAcross;inCell=false;}
-            else if(ss&&name=="Row"&&inRow){processRow();inRow=false;}
-            else if(ss&&name=="Table")inTable=false;
-            else if(ss&&name=="Worksheet"&&inSheet){
+            if(ss&&name==u"Cell"&&inCell){while(row.size()<column+mergeAcross)row.append(QString());row[column-1]=value;column+=mergeAcross;inCell=false;}
+            else if(ss&&name==u"Row"&&inRow){processRow();inRow=false;}
+            else if(ss&&name==u"Table")inTable=false;
+            else if(ss&&name==u"Worksheet"&&inSheet){
                 if((sh.kind=="logs"||sh.kind.isEmpty())&&sh.row>33)
                     sh.source.sheetName=s(sh.name+QStringLiteral("（原文前33行预览；完整内容见原文件/测井曲线）"));
                 if(sh.kind.isEmpty()&&sh.dataRows)issue(out,"XML_SHEET_MAPPING_REQUIRED","工作表表头未匹配业务模型；保留原文件及前33行预览",sh.name,0,true);
