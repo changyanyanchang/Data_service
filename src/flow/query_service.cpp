@@ -1,4 +1,5 @@
 #include "store/project_store.h"
+#include "store/well_data_query_index.h"
 #include "planar_coordinates.h"
 #include <QDir>
 #include <QJsonDocument>
@@ -82,13 +83,12 @@ bool DataService::listDataPage(const std::string& kind,long long wellId,long lon
                              std::vector<DataEntry>& out,bool& hasMore,std::string& error)const{
     out.clear();hasMore=false;error.clear();
     if(wellId<0||afterId<0||limit<1||limit>512){error="InvalidDataPageBudget";return false;}
-    QString sql;
-    if(kind=="curves")sql="SELECT c.id,l.well_id,l.source_id,l.id,c.name,c.unit||' / '||l.name,l.sample_count FROM curves c JOIN log_sets l ON l.id=c.set_id WHERE c.id>? AND (?=0 OR l.well_id=?) ORDER BY c.id LIMIT ?";
-    else if(kind=="intervals")sql="SELECT t.id,t.well_id,t.source_id,0,t.name,t.type,(SELECT count(*) FROM intervals WHERE track_id=t.id) FROM tracks t WHERE t.id>? AND (?=0 OR t.well_id=?) ORDER BY t.id LIMIT ?";
-    else{error="UnsupportedDataPageKind";return false;}
+    const auto sql=wellDataPageSql(kind,wellId>0);QVariantList args;
+    if(wellId>0)args<<wellId;args<<afterId<<limit+1;
+    if(sql.isEmpty()){error="UnsupportedDataPageKind";return false;}
+    if(!wellDataQueryIndexReady(impl_->store,error))return false;
     // Guard large text inside SQLite before returning it to C++ or allocating a DataEntry string.
-    sql="WITH page(id,well_id,source_id,parent_id,name,detail,n) AS ("+sql+") SELECT id,well_id,source_id,parent_id,CASE WHEN length(CAST(name AS BLOB))<=4096 THEN name END,CASE WHEN length(CAST(detail AS BLOB))<=4096 THEN detail END,n,length(CAST(name AS BLOB))>4096 OR length(CAST(detail AS BLOB))>4096 FROM page";
-    QSqlQuery query;if(!impl_->store.exec(sql,{afterId,wellId,wellId,limit+1},error,&query))return false;
+    QSqlQuery query;if(!impl_->store.exec(sql,args,error,&query))return false;
     std::vector<DataEntry> page;page.reserve(size_t(limit));
     while(query.next()){
         if(page.size()==size_t(limit)){hasMore=true;break;}

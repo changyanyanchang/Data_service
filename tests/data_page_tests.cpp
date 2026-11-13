@@ -1,9 +1,11 @@
 #include <paleo_data/service.h>
+#include "store/well_data_query_index.h"
 #include <QCoreApplication>
 #include <QTemporaryDir>
 #include <QFile>
 #include <QSqlDatabase>
 #include <QSqlQuery>
+#include <QSqlError>
 #include <QCryptographicHash>
 #include <limits>
 #include <iostream>
@@ -11,13 +13,13 @@
 using namespace paleo::data;
 namespace {
 void check(bool ok,const std::string &message){if(!ok)throw std::runtime_error(message);}
-ParsedFile fixture() {
+ParsedFile fixture(int firstCount=1000) {
     ParsedFile parsed;parsed.kind="synthetic";parsed.status="parsed";
     for(int wellIndex=0;wellIndex<2;++wellIndex) {
         WellDataset well;well.wellInfo.wellName="W-"+std::to_string(wellIndex);
         well.defaultDepthInfo={"MD","ft","KB"};LogSet logs;logs.logSetName="Original";
         logs.depthInfo=well.defaultDepthInfo;logs.samplingAxis.depthValues={-2.,0.,2.};
-        for(int i=0;i<(wellIndex?3:1000);++i) {
+        for(int i=0;i<(wellIndex?3:firstCount);++i) {
             LogCurve curve;curve.curveName="C-"+std::to_string(i);curve.curveUnit="mV";
             curve.sampleValues={-4.,double(i),7.};logs.logCurves.push_back(curve);
             IntervalTrack track;track.trackName="T-"+std::to_string(i);track.trackType="Declared lithology";
@@ -28,6 +30,48 @@ ParsedFile fixture() {
         well.wellbore.logSets.push_back(logs);parsed.wells.push_back(well);
     }
     return parsed;
+}
+void indexedLargeInventory(const QString& root,const QString& source) {
+    DataService writer;std::string error;check(writer.createProject(root.toStdString(),"large indexed",error),error);
+    const auto hash=QCryptographicHash::hash("synthetic",QCryptographicHash::Sha256).toHex().toStdString();long long sourceId=0;
+    check(writer.importPreparedFile(source.toStdString(),source.toStdString(),source.toStdString(),hash,fixture(10000),sourceId,error),error);
+    std::vector<long long>wells;check(writer.listSourceWells(sourceId,wells,error)&&wells.size()==2,error);writer.closeProject();
+    DataService reader;check(reader.openProjectReadOnly(root.toStdString(),error),error);
+    const auto name=QStringLiteral("data_page_index_probe");{
+        auto db=QSqlDatabase::addDatabase("QSQLITE",name);db.setDatabaseName(root+"/data.sqlite");check(db.open(),"index probe open");
+        const auto statement=[&](const QString& sql){QSqlQuery query(db);check(query.exec(sql),query.lastError().text().toStdString());return query;};
+        for(const auto& kind:{std::string("curves"),std::string("intervals")}) {
+            QSqlQuery plan(db);check(plan.prepare("EXPLAIN QUERY PLAN "+paleo::data::detail::wellDataPageSql(kind,true)),"prepare actual producer plan");
+            plan.addBindValue(wells[1]);plan.addBindValue(0LL);plan.addBindValue(3);check(plan.exec(),"run actual producer plan");QString explanation;
+            while(plan.next())explanation+=plan.value(3).toString()+"\n";
+            const auto index=kind=="curves"?"pds_well_query_curve_well":"pds_well_query_track_well";
+            check(explanation.contains(index)&&explanation.contains("well_id=?")&&explanation.contains(kind=="curves"?"curve_id>?":"track_id>?"),"exact well/keyset must seek compound index: "+explanation.toStdString());
+            check(!explanation.contains("SCAN i")&&!explanation.contains("SCAN c")&&!explanation.contains("SCAN t")&&!explanation.contains("CORRELATED"),"no other-well or interval-count scan: "+explanation.toStdString());
+            std::vector<DataEntry> page;bool more=false;check(reader.listDataPage(kind,wells[1],0,2,page,more,error)&&page.size()==2&&more,error);
+            check(page.front().name==(kind=="curves"?"C-0":"T-0")&&page.front().wellId==wells[1],"last small well after 10000 other-well objects");
+        }
+        statement("PRAGMA foreign_keys=ON");statement("BEGIN");
+        statement("UPDATE log_sets SET well_id="+QString::number(wells[1])+" WHERE well_id="+QString::number(wells[0]));
+        auto count=statement("SELECT count(*) FROM pds_well_query_curves WHERE well_id="+QString::number(wells[1]));check(count.next()&&count.value(0).toInt()==10003,"log-set reassignment updates every exact curve mapping");count.finish();
+        statement("UPDATE tracks SET well_id="+QString::number(wells[1])+" WHERE well_id="+QString::number(wells[0]));
+        count=statement("SELECT count(*) FROM pds_well_query_tracks WHERE well_id="+QString::number(wells[1]));check(count.next()&&count.value(0).toInt()==10003,"track reassignment index");count.finish();
+        statement("INSERT INTO intervals(track_id,ordinal,name,top,bottom) VALUES((SELECT max(id) FROM tracks),2,'new',3,4)");
+        count=statement("SELECT record_count FROM pds_well_query_tracks WHERE track_id=(SELECT max(id) FROM tracks)");check(count.next()&&count.value(0).toInt()==2,"increment interval count without scans");count.finish();
+        statement("DELETE FROM intervals WHERE id=(SELECT max(id) FROM intervals)");
+        count=statement("SELECT record_count FROM pds_well_query_tracks WHERE track_id=(SELECT max(id) FROM tracks)");check(count.next()&&count.value(0).toInt()==1,"decrement interval count");count.finish();
+        statement("UPDATE intervals SET track_id=(SELECT min(id) FROM tracks) WHERE id=(SELECT max(id) FROM intervals)");
+        count=statement("SELECT record_count FROM pds_well_query_tracks WHERE track_id=(SELECT max(id) FROM tracks)");check(count.next()&&count.value(0).toInt()==0,"moving an interval decrements its old track");count.finish();
+        count=statement("SELECT record_count FROM pds_well_query_tracks WHERE track_id=(SELECT min(id) FROM tracks)");check(count.next()&&count.value(0).toInt()==2,"moving an interval increments its exact new track");count.finish();
+        statement("DELETE FROM log_sets WHERE id=(SELECT min(id) FROM log_sets)");
+        count=statement("SELECT count(*) FROM pds_well_query_curves");check(count.next()&&count.value(0).toInt()==3,"cascade deletion removes derived curve mappings");count.finish();
+        statement("ROLLBACK");
+        statement("DROP INDEX pds_well_query_curve_well");
+    }QSqlDatabase::removeDatabase(name);
+    std::vector<DataEntry> page;bool more=false;
+    check(!reader.listDataPage("curves",wells[1],0,2,page,more,error)&&error.find("DataPageIndexUnavailable")==0,"old read-only/missing index has no scan fallback");reader.closeProject();
+    check(writer.openProject(root.toStdString(),error),error);writer.closeProject();check(reader.openProjectReadOnly(root.toStdString(),error),error);
+    check(reader.listDataPage("curves",wells[1],0,4,page,more,error)&&page.size()==3&&!more,"writable migration rebuilds exact index after rollback");
+    check(reader.listDataPage("intervals",wells[1],0,4,page,more,error)&&page.size()==3&&page.front().count==1,"cached counts survive rollback and rebuild");
 }
 void verifyPages(DataService &reader,const std::string &kind,long long well,int limit) {
     std::vector<DataEntry> expected,actual,page;std::string error;bool more=true;long long after=0;
@@ -73,6 +117,7 @@ int main(int argc,char **argv) {
         }QSqlDatabase::removeDatabase(connection);
         check(reader.openProjectReadOnly(project,error),error);
         check(!reader.listDataPage("curves",wells[1],0,512,page,more,error)&&page.empty()&&!more&&error=="DataPageValueBudgetExceeded","whole page rejects oversized text without truncation");
+        reader.closeProject();indexedLargeInventory(temporary.filePath("large"),source);
         std::cout<<"data page contract passed: 1000 curves/tracks, exact reconstruction, bounds, reopening, immutable values\n";
         return 0;
     }catch(const std::exception &error){std::cerr<<error.what()<<'\n';return 1;}
