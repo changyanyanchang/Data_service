@@ -41,6 +41,11 @@ bool wellDataQueryIndexReady(const ProjectStore& store,std::string& error) {
     if(!sql(store,"SELECT version FROM pds_well_query_data_schema WHERE singleton=1",error,&query)||!query.next()||query.value(0).toInt()!=1){error="DataPageIndexUnavailable: unsupported metadata index version";return false;}
     return true;
 }
+bool finishDataPage(QSqlQuery& query,std::vector<DataEntry>& staged,std::vector<DataEntry>& result,
+                    bool& hasMore,std::string& error) {
+    if(query.lastError().isValid()){result.clear();hasMore=false;error=s(query.lastError().text());return false;}
+    result=std::move(staged);return true;
+}
 bool ensureWellDataQueryIndex(ProjectStore& store,bool rebuild,std::string& error) {
     std::string ignored;const bool ready=wellDataQueryIndexReady(store,ignored);
     if(store.db.tables().contains("pds_well_query_data_schema")) {

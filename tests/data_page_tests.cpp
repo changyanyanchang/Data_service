@@ -39,6 +39,12 @@ void indexedLargeInventory(const QString& root,const QString& source) {
     DataService reader;check(reader.openProjectReadOnly(root.toStdString(),error),error);
     const auto name=QStringLiteral("data_page_index_probe");{
         auto db=QSqlDatabase::addDatabase("QSQLITE",name);db.setDatabaseName(root+"/data.sqlite");check(db.open(),"index probe open");
+        {QSqlQuery broken(db);check(broken.exec("SELECT 1 UNION ALL SELECT abs(-9223372036854775808)"),"SQLite first step succeeds");
+         check(broken.next()&&broken.value(0).toInt()==1,"one actual row before later-step failure");
+         check(!broken.next()&&broken.lastError().isValid(),"SQLite later step fails with integer overflow");
+         std::vector<DataEntry> staged(1),result;bool more=true;std::string reason;
+         check(!paleo::data::detail::finishDataPage(broken,staged,result,more,reason)&&result.empty()&&!more&&!reason.empty(),
+               "partial page must never be returned as a complete success after a real SQLite step error");}
         const auto statement=[&](const QString& sql){QSqlQuery query(db);check(query.exec(sql),query.lastError().text().toStdString());return query;};
         for(const auto& kind:{std::string("curves"),std::string("intervals")}) {
             QSqlQuery plan(db);check(plan.prepare("EXPLAIN QUERY PLAN "+paleo::data::detail::wellDataPageSql(kind,true)),"prepare actual producer plan");

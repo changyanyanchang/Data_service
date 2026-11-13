@@ -98,7 +98,7 @@ bool DataService::listDataPage(const std::string& kind,long long wellId,long lon
         row.name=s(query.value(4).toString());row.detail=s(query.value(5).toString());
         row.count=query.value(6).toLongLong();row.kind=kind;page.push_back(std::move(row));
     }
-    out=std::move(page);return true;
+    return finishDataPage(query,page,out,hasMore,error);
 }
 bool DataService::listSourceData(const std::string& kind,long long sourceId,std::vector<DataEntry>& out,std::string& e)const{
     if(sourceId<=0){out.clear();e="来源编号无效";return false;}
