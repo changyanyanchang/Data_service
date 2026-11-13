@@ -1,6 +1,5 @@
 #include "well_query_index.h"
 #include "project_store.h"
-#include <QJsonObject>
 #include <QSqlError>
 
 namespace paleo::data::detail {
@@ -11,14 +10,19 @@ bool sql(const ProjectStore& store,const QString& statement,const QVariantList& 
 }
 }
 QString normalizedWellQueryName(const QString& name) {
-    QString result;for(const auto c:name)if(!c.isSpace()&&c!='-'&&c!='_')result.append(c.toLower());return result;
+    QString result=QStringLiteral("");for(const auto c:name)if(!c.isSpace()&&c!='-'&&c!='_')result.append(c.toLower());return result;
 }
-bool updateWellQueryIndex(const ProjectStore& store,long long id,bool deleted,const QJsonObject& image,std::string& error) {
+bool updateWellQueryIndex(const ProjectStore& store,long long id,bool deleted,const QString& name,std::string& error) {
     if(deleted){if(!sql(store,"DELETE FROM pds_well_query_names WHERE well_id=?",{id},error))return false;}
-    else if(!sql(store,"INSERT OR REPLACE INTO pds_well_query_names(well_id,name_key) VALUES(?,?)",{id,normalizedWellQueryName(image.value("name").toString())},error))return false;
+    else if(!sql(store,"INSERT OR REPLACE INTO pds_well_query_names(well_id,name_key) VALUES(?,?)",{id,normalizedWellQueryName(name)},error))return false;
     return sql(store,"DELETE FROM pds_well_query_dirty WHERE well_id=?",{id},error);
 }
 bool ensureWellQueryIndex(ProjectStore& store,bool rebuild,std::string& error) {
+    // An older SDK may have installed its generic journal triggers on these
+    // derived tables. Remove only those owned triggers before repairing them.
+    for(const auto& table:QStringList{"pds_well_query_names","pds_well_query_dirty"})
+        for(const auto& event:QStringList{"i","u","d"})
+            if(!sql(store,"DROP TRIGGER IF EXISTS pds_model_"+table+"_"+event,{},error))return false;
     const bool exists=store.db.tables().contains("pds_well_query_names");
     const QStringList statements{
       "CREATE TABLE IF NOT EXISTS pds_well_query_names(well_id INTEGER PRIMARY KEY,name_key TEXT NOT NULL)",
@@ -31,14 +35,14 @@ bool ensureWellQueryIndex(ProjectStore& store,bool rebuild,std::string& error) {
     if(!exists||rebuild){
         if(!sql(store,"DELETE FROM pds_well_query_names",{},error))return false;
         QSqlQuery wells;if(!sql(store,"SELECT id,name FROM wells ORDER BY id",{},error,&wells))return false;
-        while(wells.next())if(!updateWellQueryIndex(store,wells.value(0).toLongLong(),false,QJsonObject{{"name",wells.value(1).toString()}},error))return false;
+        while(wells.next())if(!updateWellQueryIndex(store,wells.value(0).toLongLong(),false,wells.value(1).toString(),error))return false;
         return sql(store,"DELETE FROM pds_well_query_dirty",{},error);
     }
     QSqlQuery dirty;if(!sql(store,"SELECT d.well_id,w.name FROM pds_well_query_dirty d LEFT JOIN wells w ON w.id=d.well_id ORDER BY d.well_id",{},error,&dirty))return false;
     struct Entry{long long id;QString name;bool deleted;};QVector<Entry> entries;
     while(dirty.next())entries.append({dirty.value(0).toLongLong(),dirty.value(1).toString(),dirty.value(1).isNull()});
     dirty.finish();
-    for(const auto& entry:entries)if(!updateWellQueryIndex(store,entry.id,entry.deleted,QJsonObject{{"name",entry.name}},error))return false;
+    for(const auto& entry:entries)if(!updateWellQueryIndex(store,entry.id,entry.deleted,entry.name,error))return false;
     return true;
 }
 bool wellQueryIndexReady(const ProjectStore& store,std::string& error) {

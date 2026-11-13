@@ -300,9 +300,12 @@ public:
     bool listWellInfos(std::vector<WellInfoRecord>& result, std::string& error) const;
     // Indexed metadata only. Missing rows are not I/O errors. id>0 selects id;
     // otherwise name is exact (the same fallback used by catalog projections).
+    // Only id/name/TD are read; a name beyond 4096 UTF-8 bytes rejects, never clips.
+    // Input name (when used) is limited to 4096 bytes. TD is raw, not unit-converted.
     bool readWellQueryValue(long long id,const std::string& name,WellQueryValue& result,bool& found,std::string& error) const;
     // Unicode normalization matches catalog identity: lowercase QChars, omit
     // whitespace/hyphen/underscore. A dirty/legacy index explicitly refuses.
+    // afterId>=0, limit=1..256, input name<=4096 UTF-8 bytes; limit+1 index seek.
     bool findWellIdsByQueryName(const std::string& name,long long afterId,int limit,
                                std::vector<long long>& result,bool& hasMore,std::string& error) const;
     bool saveWellInfo(long long wellId, const WellInfo& value, std::string& error);

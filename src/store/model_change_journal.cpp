@@ -59,7 +59,7 @@ bool installTriggers(ProjectStore& store,std::string& error) {
     QSqlQuery tables;if(!raw(store,"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",{},error,&tables))return false;
     QStringList names;while(tables.next())names.push_back(tables.value(0).toString());tables.finish();
     for(const auto& table:names){
-        if(table.startsWith("pds_model_")||table.startsWith("curve_window_")||table=="object_revisions"||table=="source_scan_cache"||table=="changes")continue;
+        if(table.startsWith("pds_model_")||table.startsWith("pds_well_query_")||table.startsWith("curve_window_")||table=="object_revisions"||table=="source_scan_cache"||table=="changes")continue;
         for(const auto& event:QStringList{"INSERT","UPDATE","DELETE"}){
             const auto image=[&](const QString& row){
                 const auto id=row+".id",sid=row+".source_id",wid=row+".well_id";const bool removed=event=="DELETE";
@@ -179,7 +179,7 @@ bool finalize(const ProjectStore& constant,std::string& error) {
         long long ordinal=0,totalBytes=0;
         for(auto& item:items){
             QJsonObject image;if(!objectImage(store,item.kind,item.id,image,item.deleted,error))return false;
-            if(item.kind=="well"&&!updateWellQueryIndex(store,item.id,item.deleted,image,error))return false;
+            if(item.kind=="well"&&!updateWellQueryIndex(store,item.id,item.deleted,image.value("value").toObject().value("name").toString(),error))return false;
             const auto bytes=QJsonDocument(image).toJson(QJsonDocument::Compact);totalBytes+=bytes.size();
             if(bytes.size()>8*1024*1024||totalBytes>64*1024*1024){error="ModelChangeBudgetExceeded: metadata image limit";return false;}
             if(!raw(store,"INSERT INTO pds_model_items VALUES(?,?,?,?,?,?,?)",{seq,++ordinal,item.kind,item.id,item.source,item.deleted,QString::fromUtf8(bytes)},error))return false;
