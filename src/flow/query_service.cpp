@@ -78,6 +78,28 @@ static bool listEntries(const ProjectStore& store,const std::string& kind,long l
     QSqlQuery r;if(!store.exec(sql,args,e,&r))return false;while(r.next()){DataEntry v;v.id=r.value(0).toLongLong();v.wellId=r.value(1).toLongLong();v.sourceId=r.value(2).toLongLong();v.parentId=r.value(3).toLongLong();v.name=s(r.value(4).toString());v.kind=kind;v.detail=s(r.value(5).toString());v.count=r.value(6).toLongLong();out.push_back(std::move(v));}return true;
 }
 bool DataService::listData(const std::string& kind,long long wellId,std::vector<DataEntry>& out,std::string& e)const{return listEntries(impl_->store,kind,wellId,0,out,e);}
+bool DataService::listDataPage(const std::string& kind,long long wellId,long long afterId,int limit,
+                             std::vector<DataEntry>& out,bool& hasMore,std::string& error)const{
+    out.clear();hasMore=false;error.clear();
+    if(wellId<0||afterId<0||limit<1||limit>512){error="InvalidDataPageBudget";return false;}
+    QString sql;
+    if(kind=="curves")sql="SELECT c.id,l.well_id,l.source_id,l.id,c.name,c.unit||' / '||l.name,l.sample_count FROM curves c JOIN log_sets l ON l.id=c.set_id WHERE c.id>? AND (?=0 OR l.well_id=?) ORDER BY c.id LIMIT ?";
+    else if(kind=="intervals")sql="SELECT t.id,t.well_id,t.source_id,0,t.name,t.type,(SELECT count(*) FROM intervals WHERE track_id=t.id) FROM tracks t WHERE t.id>? AND (?=0 OR t.well_id=?) ORDER BY t.id LIMIT ?";
+    else{error="UnsupportedDataPageKind";return false;}
+    // Guard large text inside SQLite before returning it to C++ or allocating a DataEntry string.
+    sql="WITH page(id,well_id,source_id,parent_id,name,detail,n) AS ("+sql+") SELECT id,well_id,source_id,parent_id,CASE WHEN length(CAST(name AS BLOB))<=4096 THEN name END,CASE WHEN length(CAST(detail AS BLOB))<=4096 THEN detail END,n,length(CAST(name AS BLOB))>4096 OR length(CAST(detail AS BLOB))>4096 FROM page";
+    QSqlQuery query;if(!impl_->store.exec(sql,{afterId,wellId,wellId,limit+1},error,&query))return false;
+    std::vector<DataEntry> page;page.reserve(size_t(limit));
+    while(query.next()){
+        if(page.size()==size_t(limit)){hasMore=true;break;}
+        if(query.value(7).toBool()){error="DataPageValueBudgetExceeded";return false;}
+        DataEntry row;row.id=query.value(0).toLongLong();row.wellId=query.value(1).toLongLong();
+        row.sourceId=query.value(2).toLongLong();row.parentId=query.value(3).toLongLong();
+        row.name=s(query.value(4).toString());row.detail=s(query.value(5).toString());
+        row.count=query.value(6).toLongLong();row.kind=kind;page.push_back(std::move(row));
+    }
+    out=std::move(page);return true;
+}
 bool DataService::listSourceData(const std::string& kind,long long sourceId,std::vector<DataEntry>& out,std::string& e)const{
     if(sourceId<=0){out.clear();e="来源编号无效";return false;}
     return listEntries(impl_->store,kind,0,sourceId,out,e);

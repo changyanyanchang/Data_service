@@ -314,6 +314,11 @@ public:
     // kind: curves曲线、intervals分层道、samples样品表、time_depth时深、trajectories测斜，
     // 或 markers、core_photos、attachments、horizons、maps、volumes、sections、tables。
     bool listData(const std::string& kind, long long wellId, std::vector<DataEntry>& result, std::string& error) const;
+    // Indexed keyset metadata only, curves/intervals; wellId=0 means all wells.
+    // afterId>=0, limit 1..512, at most limit rows plus one SQL probe, ordered by ID.
+    // Names/details over 4096 UTF-8 bytes fail the complete page; values are never truncated.
+    bool listDataPage(const std::string& kind,long long wellId,long long afterId,int limit,
+                      std::vector<DataEntry>& result,bool& hasMore,std::string& error) const;
     // Filter in SQLite, without listing every other source in the work area.
     bool listSourceData(const std::string& kind, long long sourceId, std::vector<DataEntry>& result, std::string& error) const;
     // Indexed metadata identity; never loads numeric arrays or seismic samples.
