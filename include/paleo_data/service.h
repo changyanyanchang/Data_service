@@ -25,6 +25,7 @@ struct WellSummary {
     int corePhotos=0, attachments=0, markerTracks=0;
 };
 struct WellInfoRecord { long long id=0; WellInfo value; };
+struct WellQueryValue { long long id=0; std::string name; double totalDepth=Missing; };
 // 平面轴对齐最小外接矩形。四个值同时有效或同时为 Missing，不用 0 表示未知。
 // coordinateSystem/Unit 是来源声明，这里不换算单位、不做投影。
 struct PlanarExtent {
@@ -297,6 +298,13 @@ public:
     bool readWellInfo(long long wellId, WellInfo& result, std::string& error, bool inheritProjectCoordinates=true) const;
     // Basic fields only: one query, no per-well counts or payload decoding.
     bool listWellInfos(std::vector<WellInfoRecord>& result, std::string& error) const;
+    // Indexed metadata only. Missing rows are not I/O errors. id>0 selects id;
+    // otherwise name is exact (the same fallback used by catalog projections).
+    bool readWellQueryValue(long long id,const std::string& name,WellQueryValue& result,bool& found,std::string& error) const;
+    // Unicode normalization matches catalog identity: lowercase QChars, omit
+    // whitespace/hyphen/underscore. A dirty/legacy index explicitly refuses.
+    bool findWellIdsByQueryName(const std::string& name,long long afterId,int limit,
+                               std::vector<long long>& result,bool& hasMore,std::string& error) const;
     bool saveWellInfo(long long wellId, const WellInfo& value, std::string& error);
     bool createWell(const WellInfo& value, long long& wellId, std::string& error);
     // 先列出资料卡片，供选择ID。wellId=0 表示不按井过滤，也包含待归井资料。
