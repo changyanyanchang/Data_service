@@ -483,6 +483,11 @@ public:
     // 按文件位置读取单道，既不要求已知CRS，也不要求规则三维网格。
     bool readSeismicTrace(long long volumeId, long long traceIndex, const SeismicTraceReadOptions& options,
                           SeismicTraceResult& result, std::string& error, const CancelCheck& cancelled={});
+    // Exact SEG-Y IL/XL lookup. Never subtracts grid minima to guess a file ordinal,
+    // never selects a nearest trace, and rejects missing traces or oversized windows.
+    bool readSeismicTraceAtGrid(long long volumeId, int inlineNumber, int crosslineNumber,
+                               const SeismicTraceReadOptions& options, SeismicTraceResult& result,
+                               std::string& error, const CancelCheck& cancelled={});
     // direction为inline或crossline，lineNumber为真实测线号。直接看原生测线无需填写CRS。
     // 时间窗单位与返回结果一致；超出网格或格式不支持时明确报错，不遍历整个大文件。
     bool readSeismicLine(long long volumeId, const std::string& direction, int lineNumber, const SectionReadOptions& options,

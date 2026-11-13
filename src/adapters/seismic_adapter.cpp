@@ -13,9 +13,9 @@ bool reject(std::string& error,const std::string& text){error=text;return false;
 bool stopped(const CancelCheck& cancel,std::string& error){return cancel&&cancel()?(error="地震读取已取消",true):false;}
 bool sourceVolume(const DataService& service,long long id,SeismicVolume& volume,std::string& error){
     if(!service.readVolume(id,volume,error))return false;
-    std::vector<DataEntry> entries;if(!service.listData("volumes",0,entries,error))return false;
-    for(const auto& entry:entries)if(entry.id==id)return service.verifySource(entry.sourceId,error);
-    return reject(error,"地震体来源不存在");
+    DataObjectDescriptor entry;
+    if(!service.describeDataObject(DataObjectKind::SeismicVolume,id,entry,error))return false;
+    return entry.sourceId>0?service.verifySource(entry.sourceId,error):reject(error,"地震体来源不存在");
 }
 double milliseconds(const SeismicSampling& s){return s.timeUnit=="s"?1000.0:s.timeUnit=="ms"?1.0:Missing;}
 bool conventions(const SeismicVolume& volume,std::string& error){
@@ -232,6 +232,27 @@ bool DataService::readSeismicTrace(long long volumeId,long long traceIndex,const
         if(count>options.maxSamples)return reject(error,"单道结果超过maxSamples预算");
         return reader.readTrace(traceIndex,options.firstSample,count,result,error,cancel);
     }catch(const std::exception& e){return reject(error,std::string("地震单道读取失败：")+e.what());}
+}
+bool DataService::readSeismicTraceAtGrid(long long volumeId,int il,int xl,const SeismicTraceReadOptions& options,
+    SeismicTraceResult& result,std::string& error,const CancelCheck& cancel){
+    result={};error.clear();try{
+        if(stopped(cancel,error))return false;
+        if(options.firstSample<0||options.sampleCount<0||options.maxSamples<1||options.maxSamples>ValueLimit)
+            return reject(error,"单道采样参数无效");
+        SeismicVolume volume;if(!sourceVolume(*this,volumeId,volume,error))return false;
+        segy_detail::Reader reader;if(!reader.open(volume.dataFile,error,cancel,true))return false;
+        const auto index=reader.traceIndex(il,xl);
+        if(index<0)return reject(error,"指定IL/XL没有实际道");
+        const auto& facts=reader.info();
+        if(options.firstSample>=facts.sampleCount)return reject(error,"起始样点超出本道范围");
+        const int count=options.sampleCount==0?facts.sampleCount-options.firstSample:options.sampleCount;
+        if(count>options.maxSamples)return reject(error,"单道结果超过maxSamples预算");
+        if(count>facts.sampleCount-options.firstSample)return reject(error,"采样窗超出本道范围");
+        SeismicTraceResult candidate;
+        if(!reader.readTrace(index,options.firstSample,count,candidate,error,cancel))return false;
+        if(candidate.inlineNumber!=il||candidate.crosslineNumber!=xl)return reject(error,"IL/XL映射与实际道头不一致");
+        result=std::move(candidate);return true;
+    }catch(const std::exception& e){return reject(error,std::string("地震网格单道读取失败：")+e.what());}
 }
 bool DataService::readSeismicLine(long long volumeId,const std::string& direction,int lineNumber,const SectionReadOptions& options,SeismicSectionResult& result,std::string& error,const CancelCheck& cancel){
     result={};error.clear();SeismicVolume volume;if(!sourceVolume(*this,volumeId,volume,error))return false;
