@@ -110,6 +110,7 @@ struct CurveWindowResult {
     DepthInfo depthInfo;
     std::vector<double> tvdValues, tvdssValues;
     long long firstSample=0, totalSamples=0;
+    CurveDepthOrigins depthOrigins;
 };
 
 // Plot input keeps groups, source IDs and conventions separate. No file reparse,

@@ -12,5 +12,5 @@ bool refreshCurveValueWindows(ProjectStore&,long long,std::string&);
 bool upgradeCurveWindows(ProjectStore&,std::string&,const CancelCheck&,long long);
 bool readCurveWindows(ProjectStore&,long long,long long,long long,double,double,bool,bool,
                       CurveSlice&,DepthInfo&,std::vector<double>&,std::vector<double>&,
-                      long long&,const CurveReadOptions&,CurveReadStats&,std::string&);
+                      long long&,const CurveReadOptions&,CurveReadStats&,std::string&,CurveDepthOrigins* = nullptr);
 }

@@ -2,6 +2,14 @@
 #include <functional>
 
 namespace paleo::data {
+enum class CurveDepthOrigin { Unknown, Declared, Inferred };
+// Origin of each delivered convention. A compatibility fallback is not a
+// declaration by the stored log set; failed reads leave all origins Unknown.
+struct CurveDepthOrigins {
+    CurveDepthOrigin depthType=CurveDepthOrigin::Unknown;
+    CurveDepthOrigin depthUnit=CurveDepthOrigin::Unknown;
+    CurveDepthOrigin mdReference=CurveDepthOrigin::Unknown;
+};
 // Budgets count payload handed to the SQL driver, not physical disk/cache I/O.
 // Legacy blobs are materialized only when their entire payload fits both limits.
 struct CurveReadOptions {

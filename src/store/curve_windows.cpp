@@ -154,8 +154,9 @@ bool upgradeCurveWindows(ProjectStore& store,std::string& error,const CancelChec
 
 bool readCurveWindows(ProjectStore& store,long long id,long long start,long long count,double top,double bottom,bool processed,bool auxiliary,
                       CurveSlice& result,DepthInfo& depthInfo,std::vector<double>& resultTvd,std::vector<double>& resultSs,
-                      long long& total,const CurveReadOptions& options,CurveReadStats& stats,std::string& error) {
+                      long long& total,const CurveReadOptions& options,CurveReadStats& stats,std::string& error,CurveDepthOrigins* origins) {
     result={};depthInfo={};resultTvd.clear();resultSs.clear();total=0;stats={};error.clear();
+    if(origins)*origins={};CurveDepthOrigins observed;
     if(id<=0||start<0||count<0||options.maxSamples<0||options.maxReadBytes<0||options.maxLegacyBytes<0||std::isinf(top)||std::isinf(bottom)||(std::isfinite(top)&&std::isfinite(bottom)&&top>bottom)){error="曲线窗口或预算无效";return false;}
     if(stopped(options.cancelled,error))return false;
     Snapshot snapshot(store,error);if(!snapshot.active())return false;Metadata m;if(!metadata(store,id,m,error))return false;
@@ -173,10 +174,14 @@ bool readCurveWindows(ProjectStore& store,long long id,long long start,long long
         "FROM curves c JOIN log_sets l ON l.id=c.set_id LEFT JOIN sources s ON s.id=l.source_id WHERE c.id=?",{id},error,&meta)||!meta.next())return false;
     for(int column=6;column<12;++column)if(meta.value(column).toLongLong()>65536){error="CurveWindowBudgetExceeded: 曲线元数据声明超过预算";return false;}
     out.curveId=id;out.name=s(meta.value(0).toString());out.unit=s(meta.value(1).toString());info=readDepth(object(meta.value(2).toString()));
+    if(!info.depthType.empty())observed.depthType=CurveDepthOrigin::Declared;
+    if(!info.depthUnit.empty())observed.depthUnit=CurveDepthOrigin::Declared;
+    if(!info.mdReference.empty())observed.mdReference=CurveDepthOrigin::Declared;
     if(meta.value(3).toString()=="workbook" && object(meta.value(4).toString())["comprehensiveWellMetreDepth"].toBool()) {
-        if(info.depthType.empty())info.depthType="MD";if(info.depthUnit.empty())info.depthUnit="m";
+        if(info.depthType.empty()){info.depthType="MD";observed.depthType=CurveDepthOrigin::Inferred;}
+        if(info.depthUnit.empty()){info.depthUnit="m";observed.depthUnit=CurveDepthOrigin::Inferred;}
     } else if(info.depthType.empty() && meta.value(3).toString()=="logs" &&
-        QFileInfo(meta.value(5).toString()).suffix().compare("las",Qt::CaseInsensitive)==0) info.depthType="MD";
+        QFileInfo(meta.value(5).toString()).suffix().compare("las",Qt::CaseInsensitive)==0) {info.depthType="MD";observed.depthType=CurveDepthOrigin::Inferred;}
     out.depthUnit=info.depthUnit;meta.finish();
     if(start<end){
         if(!chunked){
@@ -221,6 +226,7 @@ bool readCurveWindows(ProjectStore& store,long long id,long long start,long long
         }
     }
     if(stopped(options.cancelled,error)||!snapshot.finish(error))return false;
+    if(origins)*origins=observed;
     total=m.count;result=std::move(out);depthInfo=std::move(info);resultTvd=std::move(tvd);resultSs=std::move(ss);return true;
 }
 }
