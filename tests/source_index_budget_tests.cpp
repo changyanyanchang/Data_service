@@ -25,6 +25,14 @@ void update(const QString &project,const QString &column,const QVariant &value) 
 long long bytes(const SourceIndexEntry &value) {
     return value.path.size()+value.storedPath.size()+value.kind.size()+value.status.size()+value.message.size()+value.sha256.size();
 }
+void invalidUtf8(const QString &project) {
+    const auto name=QUuid::createUuid().toString();
+    {
+        auto db=QSqlDatabase::addDatabase("QSQLITE",name);db.setDatabaseName(project+"/data.sqlite");require(db.open(),"open UTF-8 fixture");
+        QSqlQuery query(db);require(query.exec("UPDATE sources SET message=CAST(X'FF' AS TEXT) WHERE id=1"),"write invalid UTF-8 fixture");query.finish();db.close();
+    }
+    QSqlDatabase::removeDatabase(name);
+}
 void denied(DataService &service,const SourceIndexReadOptions &options,const std::string &code) {
     SourceIndexEntry value;value.path="old";value.message="old";value.id=42;SourceIndexReadStats stats;stats.textBytesRead=999;
     std::string error;require(!service.readSourceIndexEntry(1,value,error,options,&stats),"budget must reject");
@@ -71,6 +79,7 @@ int main(int argc,char **argv) {
         update(project,"message",QString(32768,QChar('y')));SourceIndexEntry compatibility;
         require(service.readSourceIndexEntry(id,compatibility,error)&&compatibility.message.size()==32768,"legacy signature semantics remain unchanged");
         denied(service,budget,"SourceIndexValueBudgetExceeded");update(project,"message",QString());
+        invalidUtf8(project);denied(service,budget,"SourceIndexValueEncodingInvalid");update(project,"message",QString());
         auto invalid=budget;invalid.maxFieldBytes=0;denied(service,invalid,"SourceIndexValueBudgetInvalid");
         invalid=budget;invalid.maxTextBytes=256*1024+1;denied(service,invalid,"SourceIndexValueBudgetInvalid");
         DataService reader;require(reader.openProjectReadOnly(utf8(project),error),error);
