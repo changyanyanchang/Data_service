@@ -33,11 +33,44 @@ std::string write(const QTemporaryDir& temp,const QString& name,const QByteArray
 bool has(const ParsedFile& p,const char* code){for(const auto& i:p.issues)if(i.code==code)return true;return false;}
 ParsedFile parse(const std::string& path,const ParseOptions& options={},const CancelCheck& cancelled={}){return parseSpreadsheetXmlFile(path,options,cancelled);}
 QString digest(const std::vector<double>& values){QCryptographicHash hash(QCryptographicHash::Sha256);for(double value:values){quint64 bits=0;std::memcpy(&bits,&value,8);if(!std::isfinite(value))bits=Q_UINT64_C(0x7ff8000000000000);const quint64 little=qToLittleEndian(bits);hash.addData(QByteArrayView(reinterpret_cast<const char*>(&little),8));}return QString::fromLatin1(hash.result().toHex());}
+void checkWellGrouping(const QTemporaryDir& temp){
+    const QString header=row({"井号","深度","GR"});
+    const QString values=row({"HZ1-1-1","100","1"})+row({"HZ1-1-1","101","2"})
+        +row({"HZ2-2-2","200","3"})+row({"HZ2-2-2","201","4"})
+        +row({"hz1_1_1井","102","5"})+row({"HZ1-1-1","103","6"});
+    auto path=write(temp,"repeated-wells.xml",book(sheet("logs",header+values)).toUtf8());
+    auto p=parse(path);
+    check(p.status!="failed"&&!has(p,"WELL_NAME_CONFLICT")&&p.wells.size()==2,"changing row well identities remain separate");
+    check(p.wells[0].wellInfo.wellName=="HZ1-1-1"&&p.wells[1].wellInfo.wellName=="HZ2-2-2","canonical well order");
+    const auto& first=p.wells[0].wellbore.logSets[0];const auto& second=p.wells[1].wellbore.logSets[0];
+    check(first.samplingAxis.depthValues==std::vector<double>{100,101,102,103}&&first.logCurves[0].sampleValues==std::vector<double>{1,2,5,6},"repeated and normalized row names preserve first well values");
+    check(second.samplingAxis.depthValues==std::vector<double>{200,201}&&second.logCurves[0].sampleValues==std::vector<double>{3,4},"changed row names preserve second well values");
+    bool rawNamePreserved=false;for(const auto& c:p.sourceTables[0].cells)if(c.row==6&&c.column==1&&c.text=="hz1_1_1井")rawNamePreserved=true;
+    check(rawNamePreserved,"canonicalization preserves original source name");
+
+    const QString firstSheet="测井曲线-HZ3-3-3井",secondSheet="测井曲线-HZ4-4-4井";
+    path=write(temp,"worksheet-wells.xml",book(sheet(firstSheet,header+row({"","10","7"})+row({"","11","8"}))
+        +sheet(secondSheet,header+row({"","20","9"})+row({"","21","10"}))).toUtf8());
+    p=parse(path);
+    check(p.wells.size()==2&&!has(p,"WELL_NAME_CONFLICT"),"worksheet well identity changes with blank row names");
+    check(p.wells[0].wellInfo.wellName=="HZ3-3-3"&&p.wells[1].wellInfo.wellName=="HZ4-4-4","each worksheet supplies its own fallback well");
+    check(p.wells[0].wellbore.logSets[0].sourceSheet==str(firstSheet)&&p.wells[1].wellbore.logSets[0].sourceSheet==str(secondSheet),"worksheet source names preserved");
+    check(p.wells[0].wellbore.logSets[0].samplingAxis.depthValues==std::vector<double>{10,11}
+        &&p.wells[1].wellbore.logSets[0].samplingAxis.depthValues==std::vector<double>{20,21},"worksheet fallback preserves all values");
+
+    path=write(temp,"late-conflict.xml",book(sheet("测井曲线-HZ1-1-1井",header
+        +row({"HZ1-1-1","100","1"})+row({"HZ1-1-1","101","2"})+row({"HZ2-2-2","102","3"}))).toUtf8());
+    p=parse(path);
+    check(p.status=="review"&&p.wells.empty()&&has(p,"WELL_NAME_CONFLICT"),"later row conflict rejects partial business data");
+    bool conflictLocated=false;for(const auto& i:p.issues)if(i.code=="WELL_NAME_CONFLICT"&&i.row==4&&i.originalText.find("HZ2-2-2")!=std::string::npos)conflictLocated=true;
+    check(conflictLocated,"later row conflict retains row and original identity");
+}
 }
 int main(int argc,char** argv){
     QCoreApplication app(argc,argv);
     try{
         QTemporaryDir temp;check(temp.isValid(),"temporary directory");
+        checkWellGrouping(temp);
         const QString header=row({"井号","深度","TVD","TVDSS","GR","SP","CNL"});
         const QString logs=sheet("测井曲线-HZ1-1-1井",header+row({"HZ1-1-1","100","99","-20","0","-30","-0.1"})+"<s:Row s:Index=\"4\">"+cell("HZ1-1-1")+cell("100.125")+"<s:Cell s:Index=\"5\"><s:Data s:Type=\"Number\">-9999</s:Data></s:Cell>"+cell("-31")+cell("bad")+"</s:Row>");
         const QString intervals=sheet("文本道",row({"井号","道名","层号","顶深","顶TVD","顶TVDSS","底深","底TVD","底TVDSS","文本"})+row({"HZ1-1-1","微相","","100","99","-20","103","102","-17","分流河道"}));
