@@ -1,4 +1,5 @@
 #include "store/project_store.h"
+#include "store/well_data_query_index.h"
 #include "planar_coordinates.h"
 #include <QDir>
 #include <QJsonDocument>
@@ -78,6 +79,27 @@ static bool listEntries(const ProjectStore& store,const std::string& kind,long l
     QSqlQuery r;if(!store.exec(sql,args,e,&r))return false;while(r.next()){DataEntry v;v.id=r.value(0).toLongLong();v.wellId=r.value(1).toLongLong();v.sourceId=r.value(2).toLongLong();v.parentId=r.value(3).toLongLong();v.name=s(r.value(4).toString());v.kind=kind;v.detail=s(r.value(5).toString());v.count=r.value(6).toLongLong();out.push_back(std::move(v));}return true;
 }
 bool DataService::listData(const std::string& kind,long long wellId,std::vector<DataEntry>& out,std::string& e)const{return listEntries(impl_->store,kind,wellId,0,out,e);}
+bool DataService::listDataPage(const std::string& kind,long long wellId,long long afterId,int limit,
+                             std::vector<DataEntry>& out,bool& hasMore,std::string& error)const{
+    out.clear();hasMore=false;error.clear();
+    if(wellId<0||afterId<0||limit<1||limit>512){error="InvalidDataPageBudget";return false;}
+    const auto sql=wellDataPageSql(kind,wellId>0);QVariantList args;
+    if(wellId>0)args<<wellId;args<<afterId<<limit+1;
+    if(sql.isEmpty()){error="UnsupportedDataPageKind";return false;}
+    if(!wellDataQueryIndexReady(impl_->store,error))return false;
+    // Guard large text inside SQLite before returning it to C++ or allocating a DataEntry string.
+    QSqlQuery query;if(!impl_->store.exec(sql,args,error,&query))return false;
+    std::vector<DataEntry> page;page.reserve(size_t(limit));
+    while(query.next()){
+        if(page.size()==size_t(limit)){hasMore=true;break;}
+        if(query.value(7).toBool()){error="DataPageValueBudgetExceeded";return false;}
+        DataEntry row;row.id=query.value(0).toLongLong();row.wellId=query.value(1).toLongLong();
+        row.sourceId=query.value(2).toLongLong();row.parentId=query.value(3).toLongLong();
+        row.name=s(query.value(4).toString());row.detail=s(query.value(5).toString());
+        row.count=query.value(6).toLongLong();row.kind=kind;page.push_back(std::move(row));
+    }
+    return finishDataPage(query,page,out,hasMore,error);
+}
 bool DataService::listSourceData(const std::string& kind,long long sourceId,std::vector<DataEntry>& out,std::string& e)const{
     if(sourceId<=0){out.clear();e="来源编号无效";return false;}
     return listEntries(impl_->store,kind,0,sourceId,out,e);
