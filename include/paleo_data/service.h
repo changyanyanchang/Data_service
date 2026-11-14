@@ -402,6 +402,13 @@ public:
                                    const std::string& timeType,
                                    const std::string& timeReference, bool negateTimes,
                                    std::string& error);
+    // Compare-and-set the interpretation of one assigned MD table. Preserves
+    // raw points, other relations from the source, and seismic sampling.
+    // Returns the committed descriptor; a stale token cannot overwrite changes.
+    bool confirmTimeDepthSemanticsAtRevision(long long timeDepthId, const std::string& expectedRevision,
+                                   const std::string& mdReference, const std::string& timeUnit,
+                                   const std::string& timeType, const std::string& timeReference,
+                                   bool negateTimes, DataObjectDescriptor& updated, std::string& error);
     // Atomic source-family confirmation plus an optional seismic volume's shared
     // datum. Time-depth values stay raw; volume sample coordinates are never rescaled.
     // An existing OWT volume is rejected rather than reinterpreted as TWT.
