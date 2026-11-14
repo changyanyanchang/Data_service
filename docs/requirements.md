@@ -10,6 +10,10 @@
 - 曲线组同样继承已确认综合工作簿的缺失 MD/m 字段，显式 TVD/英尺不覆盖。LAS 解析接受
   MD/DEPT/DEPTH 测深索引并保留其实际单位；旧 LAS 组的缺失 MD 标记在只读读口恢复，
   不补猜缺失单位，不改写原始轴或库存元数据，不依赖原始文件仍在线。
+- 有界曲线返回 `CurveWindowResult.depthOrigins`，分别标注深度类型、单位、MD 起算面的
+  `Unknown` / `Declared` / `Inferred` 来源。LAS/综合工作簿的兼容恢复只标记实际补入的
+  字段为 `Inferred`，不覆盖已有声明；失败返回默认 `Unknown`。严格分析可据此拒绝推断
+  约定，不必读取整组数组或自行查询数据库；返回数值、预算和只读行为不变。
 - 工区级地震资料包含地震体、层位和剖面路径；层位/剖面可关联所属地震体。
 - 地质平面图保存图名、类型、工区、地层、文件路径和配准状态；普通图片不自动变成空间多边形。
 - 解析保留原始值、工作表位置、来源信息和待核对项。读取/保存接口使用稳定编号。
@@ -34,6 +38,23 @@
 5. 坐标、深度基准、单位和时间类型有歧义时明确提示，不自动推断或仅改单位标签。
 6. 多线程只准备文件；协调线程按排序保存结果，避免并发完成顺序影响归井与冲突处理。
 7. 数据完整性、取消、来源变化、重开、编辑和线程一致性使用合成测试验证。
+
+`readSourceIndexEntry` 的预算重载在单条 SQLite 主键查询中，以直接列的
+`octet_length` 和惰性 `CASE` 先核对六个文本字段及合计字节，再交付字段；拒绝时
+不把超长文本转成 Qt/标准字符串。调用方分别设置单字段及总 UTF-8 字节上限，
+硬上限为 64 KiB/字段、256 KiB/行；成功统计实际返回文本字节，失败清空结果和统计。
+该重载要求 SQLite 3.43+ 的 `octet_length` 和 UTF-8 数据库；缺少支持明确返回
+`SourceIndexValueBudgetUnavailable`，不回退旧无界读取。原三参数签名和旧结果布局不变。
+SQL 边界依据 SQLite 的[直接列字节长度规则](https://www.sqlite.org/lang_corefunc.html#octet_length)
+及 [CASE 惰性求值规则](https://www.sqlite.org/lang_expr.html#the_case_expression)。
+`listDataPage` 的预算重载只先按索引读取数字 ID 和一条续页探针，再在同一只读
+savepoint 中逐 ID 读取受限文本；名称、单位、组名、道名和道类型在直接列处守预算，
+不先经 CTE 或拼接表达式物化全文。返回名称/详情的实际 UTF-8 字节累计受页总额约束。
+`CurveReadOptions` 的 `maxMetadataBytes`、`maxMetadataFieldBytes` 同为正数时启用相同
+保护，覆盖名称、单位、深度 JSON、编码和来源兼容约定元数据；默认两者为零保持旧行为。
+启用后 `maxReadBytes` 同时约束文本和数组载荷，`CurveReadStats.metadataBytesRead`
+单独记录实际交给 C++ 的 UTF-8 文本字节。该统计与数组统计都不是 VFS 物理磁盘 I/O。
+这些尾部字段扩展了曲线预算/统计值类型，使用此 SDK 的调用方须一并重编译。
 
 来源重定位提供只读准备 / 所属线程提交两段接口。`readSourceIndexEntry` 按主键
 查单一来源，不能先枚举所有来源。`prepareSourceRelocation` 按记录的指纹类型

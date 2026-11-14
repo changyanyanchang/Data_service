@@ -18,14 +18,14 @@ bool DataService::readCurveWindow(const CurveWindowQuery& query,CurveWindowResul
     result={};CurveReadStats readStats;CurveWindowResult next;next.firstSample=query.firstSample;
     const bool ok=detail::readCurveWindows(impl_->store,query.curveId,query.firstSample,query.sampleCount,Missing,Missing,
         query.processed,query.includeAuxiliaryAxes,next.curve,next.depthInfo,next.tvdValues,next.tvdssValues,next.totalSamples,
-        options,readStats,error);
+        options,readStats,error,&next.depthOrigins);
     if(stats)*stats=readStats;if(ok)result=std::move(next);return ok;
 }
 bool DataService::readCurveDepthWindow(long long id,double top,double bottom,bool processed,
     CurveWindowResult& result,std::string& error,const CurveReadOptions& options,CurveReadStats* stats) const {
     result={};CurveReadStats usage;CurveWindowResult next;next.firstSample=-1;
     const bool ok=detail::readCurveWindows(impl_->store,id,0,std::numeric_limits<long long>::max(),top,bottom,
-        processed,true,next.curve,next.depthInfo,next.tvdValues,next.tvdssValues,next.totalSamples,options,usage,error);
+        processed,true,next.curve,next.depthInfo,next.tvdValues,next.tvdssValues,next.totalSamples,options,usage,error,&next.depthOrigins);
     if(stats)*stats=usage;if(ok)result=std::move(next);return ok;
 }
 bool DataService::readCurveTableWindow(long long id,long long offset,int limit,DataTable& result,std::string& error,

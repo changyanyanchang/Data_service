@@ -1,4 +1,5 @@
 #include "curve_windows.h"
+#include "curve_window_metadata.h"
 #include <algorithm>
 #include <atomic>
 #include <limits>
@@ -10,7 +11,7 @@ bool stopped(const std::function<bool()>& cancel,std::string& error) {
     if(cancel&&cancel()){error="CurveWindowCancelled: 已取消曲线读取";return true;}return false;
 }
 bool charge(long long bytes,const CurveReadOptions& options,CurveReadStats& stats,std::string& error) {
-    if(bytes<0||bytes>options.maxReadBytes-stats.payloadBytesRead){error="CurveWindowBudgetExceeded: 曲线读取超出字节预算";return false;}
+    if(bytes<0||bytes>options.maxReadBytes-stats.payloadBytesRead-stats.metadataBytesRead){error="CurveWindowBudgetExceeded: 曲线读取超出字节预算";return false;}
     return true;
 }
 QByteArray part(const std::vector<double>& values,size_t first,size_t count) {
@@ -27,10 +28,7 @@ public:
     bool active()const{return active_;}
     bool finish(std::string& error){if(!store_.exec("RELEASE "+name_,{},error))return false;active_=false;return true;}
 };
-struct Metadata {
-    long long setId=0,count=0,depthBytes=0,tvdBytes=0,ssBytes=0,rawBytes=0,processedBytes=0,qualityBytes=0;
-    bool hasProcessed=false;
-};
+using Metadata=CurveWindowMetadata;
 bool metadata(ProjectStore& store,long long id,Metadata& m,std::string& error) {
     QSqlQuery r;
     if(!store.exec("SELECT l.id,l.sample_count,coalesce(length(l.depths),0),coalesce(length(l.tvd),0),coalesce(length(l.tvdss),0),coalesce(length(c.raw_values),0),coalesce(length(c.processed_values),0),coalesce(length(c.quality),0),c.processed_values IS NOT NULL,l.encoding,coalesce(length(c.name),0),coalesce(length(c.unit),0),coalesce(length(l.depth_json),0) FROM curves c JOIN log_sets l ON l.id=c.set_id WHERE c.id=?",{id},error,&r))return false;
@@ -154,15 +152,20 @@ bool upgradeCurveWindows(ProjectStore& store,std::string& error,const CancelChec
 
 bool readCurveWindows(ProjectStore& store,long long id,long long start,long long count,double top,double bottom,bool processed,bool auxiliary,
                       CurveSlice& result,DepthInfo& depthInfo,std::vector<double>& resultTvd,std::vector<double>& resultSs,
-                      long long& total,const CurveReadOptions& options,CurveReadStats& stats,std::string& error) {
+                      long long& total,const CurveReadOptions& options,CurveReadStats& stats,std::string& error,CurveDepthOrigins* origins) {
     result={};depthInfo={};resultTvd.clear();resultSs.clear();total=0;stats={};error.clear();
+    if(origins)*origins={};CurveDepthOrigins observed;
     if(id<=0||start<0||count<0||options.maxSamples<0||options.maxReadBytes<0||options.maxLegacyBytes<0||std::isinf(top)||std::isinf(bottom)||(std::isfinite(top)&&std::isfinite(bottom)&&top>bottom)){error="曲线窗口或预算无效";return false;}
     if(stopped(options.cancelled,error))return false;
-    Snapshot snapshot(store,error);if(!snapshot.active())return false;Metadata m;if(!metadata(store,id,m,error))return false;
+    const bool bounded=options.maxMetadataBytes!=0||options.maxMetadataFieldBytes!=0;
+    if(bounded&&(options.maxMetadataBytes<1||options.maxMetadataFieldBytes<1)){error="CurveWindowBudgetInvalid: metadata limits";return false;}
+    Snapshot snapshot(store,error);if(!snapshot.active())return false;Metadata m;QStringList text;
+    if(bounded){if(!boundedCurveMetadata(store,id,options,stats,m,text,error))return false;}
+    else if(!metadata(store,id,m,error))return false;
     const auto end=start>=m.count?m.count:start+std::min(count,m.count-start);
     bool chunked=false;if(!hasChunks(store,id,m,chunked,error))return false;stats.chunked=chunked;
     CurveSlice out;DepthInfo info;std::vector<double> tvd,ss;QSqlQuery meta;
-    if(!store.exec("SELECT CASE WHEN length(CAST(c.name AS BLOB))<=65536 THEN c.name END,"
+    if(!bounded){if(!store.exec("SELECT CASE WHEN length(CAST(c.name AS BLOB))<=65536 THEN c.name END,"
         "CASE WHEN length(CAST(c.unit AS BLOB))<=65536 THEN c.unit END,"
         "CASE WHEN length(CAST(l.depth_json AS BLOB))<=65536 THEN l.depth_json END,"
         "CASE WHEN length(CAST(s.kind AS BLOB))<=65536 THEN s.kind END,CASE WHEN length(CAST(s.options AS BLOB))<=65536 THEN s.options END,"
@@ -172,12 +175,17 @@ bool readCurveWindows(ProjectStore& store,long long id,long long start,long long
         "coalesce(length(CAST(l.depth_json AS BLOB)),0),coalesce(length(CAST(s.kind AS BLOB)),0) "
         "FROM curves c JOIN log_sets l ON l.id=c.set_id LEFT JOIN sources s ON s.id=l.source_id WHERE c.id=?",{id},error,&meta)||!meta.next())return false;
     for(int column=6;column<12;++column)if(meta.value(column).toLongLong()>65536){error="CurveWindowBudgetExceeded: 曲线元数据声明超过预算";return false;}
-    out.curveId=id;out.name=s(meta.value(0).toString());out.unit=s(meta.value(1).toString());info=readDepth(object(meta.value(2).toString()));
-    if(meta.value(3).toString()=="workbook" && object(meta.value(4).toString())["comprehensiveWellMetreDepth"].toBool()) {
-        if(info.depthType.empty())info.depthType="MD";if(info.depthUnit.empty())info.depthUnit="m";
-    } else if(info.depthType.empty() && meta.value(3).toString()=="logs" &&
-        QFileInfo(meta.value(5).toString()).suffix().compare("las",Qt::CaseInsensitive)==0) info.depthType="MD";
-    out.depthUnit=info.depthUnit;meta.finish();
+    for(int column=0;column<6;++column)text.append(meta.value(column).toString());meta.finish();}
+    out.curveId=id;out.name=s(text[0]);out.unit=s(text[1]);info=readDepth(object(text[2]));
+    if(!info.depthType.empty())observed.depthType=CurveDepthOrigin::Declared;
+    if(!info.depthUnit.empty())observed.depthUnit=CurveDepthOrigin::Declared;
+    if(!info.mdReference.empty())observed.mdReference=CurveDepthOrigin::Declared;
+    if(text[3]=="workbook" && object(text[4])["comprehensiveWellMetreDepth"].toBool()) {
+        if(info.depthType.empty()){info.depthType="MD";observed.depthType=CurveDepthOrigin::Inferred;}
+        if(info.depthUnit.empty()){info.depthUnit="m";observed.depthUnit=CurveDepthOrigin::Inferred;}
+    } else if(info.depthType.empty() && text[3]=="logs" &&
+        QFileInfo(text[5]).suffix().compare("las",Qt::CaseInsensitive)==0) {info.depthType="MD";observed.depthType=CurveDepthOrigin::Inferred;}
+    out.depthUnit=info.depthUnit;
     if(start<end){
         if(!chunked){
             const long long bytes=m.depthBytes+m.rawBytes+m.processedBytes+m.qualityBytes+(auxiliary?m.tvdBytes+m.ssBytes:0);
@@ -221,6 +229,7 @@ bool readCurveWindows(ProjectStore& store,long long id,long long start,long long
         }
     }
     if(stopped(options.cancelled,error)||!snapshot.finish(error))return false;
+    if(origins)*origins=observed;
     total=m.count;result=std::move(out);depthInfo=std::move(info);resultTvd=std::move(tvd);resultSs=std::move(ss);return true;
 }
 }
