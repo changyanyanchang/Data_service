@@ -21,6 +21,62 @@ static void executeAt(const QString& project,const QString& sql) {
   }
   QSqlDatabase::removeDatabase(name);
 }
+static void checkBoundedRowBatches(const QTemporaryDir& temp) {
+  const auto source=temp.filePath("row-batches.txt"),project=temp.filePath("row-batches");
+  const QByteArray bytes="synthetic multi-row persistence fixture";
+  {QFile file(source);check(file.open(QIODevice::WriteOnly)&&file.write(bytes)==bytes.size(),"write row fixture");}
+  const auto hash=QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex().toStdString();
+  ParsedFile parsed;parsed.kind="synthetic";parsed.status="parsed";
+  WellDataset well;well.wellInfo.wellName="BATCH-ROWS";
+  IntervalTrack track;track.trackName="layers";
+  for(int i=0;i<129;++i){GeologicalInterval row;row.intervalName="layer-"+std::to_string(i);row.topDepth=i-10.;row.bottomDepth=i-9.;row.sourceRow=i+2;track.intervals.push_back(row);}
+  well.wellbore.intervalTracks.push_back(track);
+  SampleTable samples;samples.tableName="analysis";SampleRecord sample;sample.sampleNumber="sample";
+  for(int i=0;i<190;++i)sample.measurements.push_back({"m-"+std::to_string(i),"",i%3?double(i):Missing,"raw-"+std::to_string(i)});
+  samples.samples.push_back(sample);well.wellbore.sampleTables.push_back(samples);parsed.wells.push_back(well);
+  SeismicHorizon horizon;horizon.horizonName="surface";
+  for(int i=0;i<275;++i)horizon.points.push_back({i,2*i,100.+i,200.+i,i%3?double(-i):Missing});
+  parsed.horizons.push_back(horizon);
+  SourceTable table;table.sheetName="raw";table.rowCount=679;table.columnCount=1;
+  for(int i=0;i<679;++i)table.cells.push_back({i+1,1,"cell-"+std::to_string(i)});
+  parsed.sourceTables.push_back(table);
+  DataService service;std::string error;long long sourceId=0;
+  check(service.createProject(u(project),"row batches",error),error);
+  ModelChangeHead before;check(service.readModelChangeHead(before,error),error);
+  executeAt(project,"CREATE TRIGGER reject_middle_cell BEFORE INSERT ON source_cells WHEN NEW.row_num=300 BEGIN SELECT RAISE(ABORT,'injected middle-row failure'); END");
+  check(!service.importPreparedFile(u(source),u(source),u(source),hash,parsed,sourceId,error)&&sourceId==0,"middle statement constraint failure rejects file");
+  check(error.find("injected middle-row failure")!=std::string::npos,"injected row failure reached");
+  std::vector<SourceEntry> sources;std::vector<WellSummary> wells;
+  check(service.listSources(sources,error)&&sources.empty()&&service.listWells(wells,error)&&wells.empty(),"constraint failure rolls back earlier batches and objects");
+  ModelChangeHead after;check(service.readModelChangeHead(after,error)&&after.sequence==before.sequence,"failed batches publish no journal operation");
+  executeAt(project,"DROP TRIGGER reject_middle_cell");
+  bool sawStoredChunk=false;
+  const auto cancelAfterChunk=[&]{
+    for(const auto& name:QSqlDatabase::connectionNames()){
+      auto db=QSqlDatabase::database(name,false);if(db.databaseName()!=project+"/data.sqlite")continue;
+      QSqlQuery query(db);if(query.exec("SELECT count(*) FROM source_cells")&&query.next()&&query.value(0).toInt()>=225){sawStoredChunk=true;return true;}
+    }return false;
+  };
+  check(!service.importPreparedFile(u(source),u(source),u(source),hash,parsed,sourceId,error,cancelAfterChunk)&&sourceId==0&&sawStoredChunk,"cancel after a full stored chunk rejects file");
+  check(service.listSources(sources,error)&&sources.empty()&&service.listWells(wells,error)&&wells.empty(),"cancel rolls back already-stored chunks");
+  check(service.readModelChangeHead(after,error)&&after.sequence==before.sequence,"cancelled batches publish no journal operation");
+  check(service.importPreparedFile(u(source),u(source),u(source),hash,parsed,sourceId,error),error);
+  std::vector<DataEntry> entries;check(service.listData("intervals",0,entries,error)&&entries.size()==1,error);
+  std::vector<IntervalRecord> intervals;check(service.readIntervals(entries.front().id,Missing,Missing,intervals,error)&&intervals.size()==129,"all interval chunks and tail persist");
+  for(size_t i=0;i<intervals.size();++i)check(intervals[i].value.intervalName==track.intervals[i].intervalName&&intervals[i].value.topDepth==double(i)-10.,"interval ordering and negative values persist");
+  check(service.listData("samples",0,entries,error)&&entries.size()==1,error);SampleTable read;
+  check(service.readSampleTable(entries.front().id,read,error)&&read.samples.size()==1&&read.samples.front().measurements.size()==190,"measurement chunk and tail persist");
+  for(int i=0;i<190;++i){const auto& m=read.samples.front().measurements[i];check(m.originalText=="raw-"+std::to_string(i)&&(i%3?m.numericValue==i:std::isnan(m.numericValue)),"measurement nulls and original strings persist");}
+  check(service.listData("horizons",0,entries,error)&&entries.size()==1,error);SeismicHorizon readHorizon;
+  check(service.readHorizon(entries.front().id,0,1000,readHorizon,error)&&readHorizon.points.size()==275,"horizon chunks and tail persist");
+  for(int i=0;i<275;++i)check(readHorizon.points[i].inlineNumber==i&&(i%3?readHorizon.points[i].zTime==-i:std::isnan(readHorizon.points[i].zTime)),"horizon indices and nulls persist");
+  service.closeProject();check(service.openProjectReadOnly(u(project),error),error);
+  const auto inspect="batch-inspect-"+QUuid::createUuid().toString(QUuid::WithoutBraces);
+  {auto db=QSqlDatabase::addDatabase("QSQLITE",inspect);db.setConnectOptions("QSQLITE_OPEN_READONLY");db.setDatabaseName(project+"/data.sqlite");check(db.open(),"open persisted rows");
+   QSqlQuery q(db);check(q.exec("SELECT row_num,col_num,text FROM source_cells ORDER BY row_num,col_num"),"read original cells");int i=0;
+   while(q.next()){check(q.value(0).toInt()==i+1&&q.value(1).toInt()==1&&q.value(2).toString()==QString("cell-%1").arg(i),"raw positions and text persist");++i;}check(i==679,"all raw-cell chunks and tail survive reopen");}
+  QSqlDatabase::removeDatabase(inspect);
+}
 static void checkPreparedSegyRelocation(const QTemporaryDir& temp) {
   const auto source=temp.filePath("prepared.sgy");
   const QByteArray bytes="synthetic prepared SEG-Y source; no amplitude decoding required\n";
@@ -109,6 +165,7 @@ int main(int argc,char** argv) {
   QCoreApplication app(argc,argv);
   try {
     QTemporaryDir temp; const auto source=temp.filePath("source.las");
+    checkBoundedRowBatches(temp);
     const QByteArray original="host normalized source\n";
     QFile file(source); check(file.open(QIODevice::WriteOnly),"write source"); file.write(original); file.close();
     const auto hash=QCryptographicHash::hash(original,QCryptographicHash::Sha256).toHex().toStdString();
