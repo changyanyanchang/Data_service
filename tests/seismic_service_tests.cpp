@@ -21,6 +21,25 @@ void fixture(const QString& path,bool coordinates=true){
 }
 long long importVolume(DataService& service,const QString& file,std::string& error){ImportReport report;ImportOptions options;options.copySources=false;check(service.importFile(utf8(file),options,report,error),error);std::vector<DataEntry> volumes;check(service.listData("volumes",0,volumes,error),error);check(!volumes.empty(),"volume registered");return volumes.back().id;}
 void confirm(DataService& service,long long id,std::string& error){SeismicVolume volume;check(service.readVolume(id,volume,error),error);check(volume.traces.empty(),"metadata must not load traces");volume.geometry.coordinateSystem="TEST_PROJECTED";volume.geometry.coordinateUnit="m";volume.sampling.firstTime=100;volume.sampling.sampleCount=8;volume.sampling.sampleInterval=2;volume.sampling.timeUnit="ms";volume.sampling.timeType="TWT";volume.sampling.timeReference="fixture datum";check(service.saveVolume(id,volume,error),error);}
+void gridTraceLookup(const QTemporaryDir& temp){
+    DataService service;std::string error;
+    check(service.createProject(utf8(temp.path()+"/grid-trace"),"Grid trace",error),error);
+    const auto file=temp.path()+"/grid-trace.sgy";fixture(file);
+    const auto id=importVolume(service,file,error);
+    SeismicTraceReadOptions options;options.firstSample=3;options.sampleCount=2;options.maxSamples=2;
+    SeismicTraceResult result;
+    check(service.readSeismicTraceAtGrid(id,104,206,options,result,error),error);
+    check(result.traceIndex==10&&result.inlineNumber==104&&result.crosslineNumber==206,"real IL/XL after a missing trace");
+    check(result.amplitudes==std::vector<float>({233,234}),"exact bounded window, not ordinal from grid minima");
+    check(!service.readSeismicTraceAtGrid(id,102,204,options,result,error)&&result.amplitudes.empty(),"missing trace is not nearest neighbour");
+    check(!service.readSeismicTraceAtGrid(id,101,200,options,result,error)&&result.amplitudes.empty(),"unknown line is not snapped to grid");
+    options.sampleCount=3;
+    check(!service.readSeismicTraceAtGrid(id,104,206,options,result,error),"window budget rejects before output");
+    options.sampleCount=2;options.firstSample=7;
+    check(!service.readSeismicTraceAtGrid(id,104,206,options,result,error),"out-of-range window is explicit");
+    options.firstSample=0;
+    check(!service.readSeismicTraceAtGrid(id,104,206,options,result,error,[]{return true;})&&result.amplitudes.empty(),"cancelled grid read exposes no samples");
+}
 void projectCoordinates(const QTemporaryDir& temp){
     DataService service;std::string error;const auto root=utf8(temp.path()+"/defaults");
     check(service.createProject(root,"Default coordinates",error),error);
@@ -73,7 +92,7 @@ static void pairedTimeDepth(const QTemporaryDir& temp){
     check(service.readTimeDepth(ids[0],table,error)&&table.depthTimePairs[0].timeValue==-50,"raw source values remain intact");
 }
 int main(int argc,char**argv){QCoreApplication app(argc,argv);QCoreApplication::setApplicationName("paleo-data-seismic-tests");try{
-    QTemporaryDir temp;check(temp.isValid(),"temporary directory");projectCoordinates(temp);pairedTimeDepth(temp);std::string error;DataService service;check(service.createProject(utf8(temp.path()+"/project"),"Seismic tests",error),error);
+    QTemporaryDir temp;check(temp.isValid(),"temporary directory");gridTraceLookup(temp);projectCoordinates(temp);pairedTimeDepth(temp);std::string error;DataService service;check(service.createProject(utf8(temp.path()+"/project"),"Seismic tests",error),error);
     const QString path=temp.path()+"/step2.sgy";fixture(path);const auto id=importVolume(service,path,error);SeismicTimeSliceResult slice;
     check(!service.readTimeSlice(id,104,{},slice,error)&&slice.amplitudes.empty(),"unknown reference rejected");confirm(service,id,error);
     TimeSliceReadOptions timeOptions;timeOptions.maxInlineCount=3;timeOptions.maxCrosslineCount=4;

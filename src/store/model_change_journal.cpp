@@ -1,4 +1,5 @@
 #include "model_change_journal.h"
+#include "well_query_index.h"
 #include "project_store.h"
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -58,7 +59,7 @@ bool installTriggers(ProjectStore& store,std::string& error) {
     QSqlQuery tables;if(!raw(store,"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",{},error,&tables))return false;
     QStringList names;while(tables.next())names.push_back(tables.value(0).toString());tables.finish();
     for(const auto& table:names){
-        if(table.startsWith("pds_model_")||table.startsWith("curve_window_")||table=="object_revisions"||table=="source_scan_cache"||table=="changes")continue;
+        if(table.startsWith("pds_model_")||table.startsWith("pds_well_query_")||table.startsWith("curve_window_")||table=="object_revisions"||table=="source_scan_cache"||table=="changes")continue;
         for(const auto& event:QStringList{"INSERT","UPDATE","DELETE"}){
             const auto image=[&](const QString& row){
                 const auto id=row+".id",sid=row+".source_id",wid=row+".well_id";const bool removed=event=="DELETE";
@@ -178,6 +179,7 @@ bool finalize(const ProjectStore& constant,std::string& error) {
         long long ordinal=0,totalBytes=0;
         for(auto& item:items){
             QJsonObject image;if(!objectImage(store,item.kind,item.id,image,item.deleted,error))return false;
+            if(item.kind=="well"&&!updateWellQueryIndex(store,item.id,item.deleted,image.value("value").toObject().value("name").toString(),error))return false;
             const auto bytes=QJsonDocument(image).toJson(QJsonDocument::Compact);totalBytes+=bytes.size();
             if(bytes.size()>8*1024*1024||totalBytes>64*1024*1024){error="ModelChangeBudgetExceeded: metadata image limit";return false;}
             if(!raw(store,"INSERT INTO pds_model_items VALUES(?,?,?,?,?,?,?)",{seq,++ordinal,item.kind,item.id,item.source,item.deleted,QString::fromUtf8(bytes)},error))return false;
@@ -230,7 +232,7 @@ bool ensureModelChangeJournal(ProjectStore& store,std::string& error) {
     if(!raw(store,"INSERT OR IGNORE INTO pds_model_state VALUES(1,?,?,0,0)",{uuid(),uuid()},error)||!raw(store,"INSERT OR IGNORE INTO pds_model_context VALUES(1,NULL)",{},error))return fail();
     QSqlQuery state;if(!raw(store,"SELECT unmanaged FROM pds_model_state WHERE singleton=1",{},error,&state)||!state.next())return fail();const bool rebuild=state.value(0).toBool();state.finish();
     if(rebuild&&(!raw(store,"DELETE FROM pds_model_items",{},error)||!raw(store,"DELETE FROM pds_model_batches",{},error)||!raw(store,"DELETE FROM pds_model_dirty",{},error)||!raw(store,"UPDATE pds_model_state SET generation=?,sequence=0,unmanaged=0 WHERE singleton=1",{uuid()},error)))return fail();
-    if(!raw(store,"UPDATE pds_model_context SET operation_id=NULL WHERE singleton=1",{},error)||!installTriggers(store,error)||!raw(store,"INSERT OR REPLACE INTO ds_meta VALUES('model_change_schema','1')",{},error)||!raw(store,"COMMIT",{},error))return fail();
+    if(!ensureWellQueryIndex(store,rebuild,error)||!raw(store,"UPDATE pds_model_context SET operation_id=NULL WHERE singleton=1",{},error)||!installTriggers(store,error)||!raw(store,"INSERT OR REPLACE INTO ds_meta VALUES('model_change_schema','1')",{},error)||!raw(store,"COMMIT",{},error))return fail();
     QSqlQuery cookie;if(!raw(store,"PRAGMA schema_version",{},error,&cookie)||!cookie.next())return false;store.journalSchemaCookie=cookie.value(0).toLongLong();cookie.finish();
     if(!ownIdentity(store,store.journalStoreId,store.journalGeneration,error))return false;
     store.journalFileIdentity=modelDatabaseFileIdentity(QDir(store.root).filePath("data.sqlite"),error);if(store.journalFileIdentity.isEmpty())return false;

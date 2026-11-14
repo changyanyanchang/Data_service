@@ -25,6 +25,7 @@ struct WellSummary {
     int corePhotos=0, attachments=0, markerTracks=0;
 };
 struct WellInfoRecord { long long id=0; WellInfo value; };
+struct WellQueryValue { long long id=0; std::string name; double totalDepth=Missing; };
 // 平面轴对齐最小外接矩形。四个值同时有效或同时为 Missing，不用 0 表示未知。
 // coordinateSystem/Unit 是来源声明，这里不换算单位、不做投影。
 struct PlanarExtent {
@@ -297,6 +298,16 @@ public:
     bool readWellInfo(long long wellId, WellInfo& result, std::string& error, bool inheritProjectCoordinates=true) const;
     // Basic fields only: one query, no per-well counts or payload decoding.
     bool listWellInfos(std::vector<WellInfoRecord>& result, std::string& error) const;
+    // Indexed metadata only. Missing rows are not I/O errors. id>0 selects id;
+    // otherwise name is exact (the same fallback used by catalog projections).
+    // Only id/name/TD are read; a name beyond 4096 UTF-8 bytes rejects, never clips.
+    // Input name (when used) is limited to 4096 bytes. TD is raw, not unit-converted.
+    bool readWellQueryValue(long long id,const std::string& name,WellQueryValue& result,bool& found,std::string& error) const;
+    // Unicode normalization matches catalog identity: lowercase QChars, omit
+    // whitespace/hyphen/underscore. A dirty/legacy index explicitly refuses.
+    // afterId>=0, limit=1..256, input name<=4096 UTF-8 bytes; limit+1 index seek.
+    bool findWellIdsByQueryName(const std::string& name,long long afterId,int limit,
+                               std::vector<long long>& result,bool& hasMore,std::string& error) const;
     bool saveWellInfo(long long wellId, const WellInfo& value, std::string& error);
     bool createWell(const WellInfo& value, long long& wellId, std::string& error);
     // 先列出资料卡片，供选择ID。wellId=0 表示不按井过滤，也包含待归井资料。
@@ -472,6 +483,11 @@ public:
     // 按文件位置读取单道，既不要求已知CRS，也不要求规则三维网格。
     bool readSeismicTrace(long long volumeId, long long traceIndex, const SeismicTraceReadOptions& options,
                           SeismicTraceResult& result, std::string& error, const CancelCheck& cancelled={});
+    // Exact SEG-Y IL/XL lookup. Never subtracts grid minima to guess a file ordinal,
+    // never selects a nearest trace, and rejects missing traces or oversized windows.
+    bool readSeismicTraceAtGrid(long long volumeId, int inlineNumber, int crosslineNumber,
+                               const SeismicTraceReadOptions& options, SeismicTraceResult& result,
+                               std::string& error, const CancelCheck& cancelled={});
     // direction为inline或crossline，lineNumber为真实测线号。直接看原生测线无需填写CRS。
     // 时间窗单位与返回结果一致；超出网格或格式不支持时明确报错，不遍历整个大文件。
     bool readSeismicLine(long long volumeId, const std::string& direction, int lineNumber, const SectionReadOptions& options,
