@@ -39,7 +39,8 @@ bool metadataTextValues(const QSqlQuery &query,int first,const QStringList &colu
     for(int i=0;i<columns.size();++i) {
         const auto value=query.value(first+i).toByteArray();
         if(value.size()>options.maxFieldBytes||value.size()>options.maxTextBytes-bytes){error=std::string(prefix)+"BudgetExceeded";return false;}
-        QStringDecoder decoder(QStringDecoder::Utf8);const QString decoded=decoder(value);Q_UNUSED(decoded);
+        QStringDecoder decoder(QStringDecoder::Utf8,QStringConverter::Flag::Stateless);
+        const QString decoded=decoder(value);Q_UNUSED(decoded);
         if(decoder.hasError()){error=std::string(prefix)+"EncodingInvalid";return false;}
         pending.append(value);bytes+=value.size();
     }
