@@ -80,7 +80,7 @@ QJsonObject encode(const StratigraphicScheme& v)
         w.append(QJsonObject{{"wellId", QString::number(x.wellId)}, {"interval", idq(x.interval)}, {"depthType", q(x.depthType)},
                              {"depthUnit", q(x.depthUnit)}, {"top", num(x.top)}, {"bottom", num(x.bottom)}, {"internal", arr3(x.internal)},
                              {"internalStatus", arr3(x.internalStatus)}, {"locked", arr3(x.locked)}, {"status", q(x.status)},
-                             {"evidence", q(x.evidenceJson)}});
+                             {"evidence", q(x.evidenceJson)}, {"occurrenceId", q(x.occurrenceId)}});
     o.insert("boundaries", b); o.insert("intervals", i); o.insert("subIntervals", s); o.insert("divisions", d); o.insert("wellOccurrences", w);
     return o;
 }
@@ -124,6 +124,8 @@ bool decode(const QJsonObject& o, StratigraphicScheme& v, std::string& error)
         if (in.size() != 3 || is.size() != 3 || lk.size() != 3) { error = "井层段记录损坏"; return false; }
         for (int k = 0; k < 3; ++k) { w.internal[k] = real(in[k]); w.internalStatus[k] = s(is[k].toString()); w.locked[k] = lk[k].toBool(); }
         w.status = str(x, "status"); w.evidenceJson = str(x, "evidence");
+        if(x.contains("occurrenceId")&&!x.value("occurrenceId").isString()) {error="井出现身份字段损坏";return false;}
+        w.occurrenceId=str(x,"occurrenceId");
         v.wellOccurrences.push_back(w);
     }
     return true;
@@ -219,6 +221,18 @@ bool commitInternal(ProjectStore& st, StratigraphicScheme scheme, const std::str
     if (head != expected) { error = "层段方案版本冲突：当前头修订已变化，请重新读取后再提交"; return false; }
     StratigraphicScheme before;
     if (existing && !readRevision(st, scheme.id, head, before, error)) return false;
+    // New occurrences receive durable identities only in the committing transaction.
+    // Older immutable revisions remain unchanged; subsequent edits carry these IDs.
+    for(auto &occurrence:scheme.wellOccurrences) {
+        if(existing&&!occurrence.occurrenceId.empty()) {
+            const auto old=std::find_if(before.wellOccurrences.begin(),before.wellOccurrences.end(),[&](const auto &value){
+                return value.occurrenceId==occurrence.occurrenceId;});
+            if(old==before.wellOccurrences.end()||old->wellId!=occurrence.wellId||old->interval!=occurrence.interval) {
+                error="井出现身份失效或被移到其他井/父单元";return false;
+            }
+        }
+        if(!existing||occurrence.occurrenceId.empty())occurrence.occurrenceId="occ-"+s(ix::newId());
+    }
     scheme.projectId = project;
     scheme.parentRevision.value = head;
     scheme.revision.value = s(ix::newId());

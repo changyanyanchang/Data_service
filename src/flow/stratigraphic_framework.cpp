@@ -5,6 +5,8 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <tuple>
+#include <QString>
 
 namespace paleo::data::framework {
 namespace {
@@ -31,8 +33,21 @@ const SubIntervalDivision* divisionOf(const StratigraphicScheme& s, const Interv
 }
 const WellIntervalOccurrence* occurrenceOf(const StratigraphicScheme& s, long long well, const IntervalId& id)
 {
-    for (const auto& o : s.wellOccurrences) if (o.wellId == well && o.interval == id) return &o;
-    return nullptr;
+    const WellIntervalOccurrence* found=nullptr;
+    for (const auto& o : s.wellOccurrences) if (o.wellId == well && o.interval == id) {
+        if(found)return nullptr;found=&o;
+    }
+    return found;
+}
+double depthScale(const WellIntervalOccurrence &o) {
+    const auto unit=QString::fromStdString(o.depthUnit).trimmed().toUpper();
+    if(unit=="M"||unit=="METRE"||unit=="METRES"||unit=="METER"||unit=="METERS")return 1.;
+    if(unit=="FT"||unit=="FEET"||unit=="FOOT"||unit=="F")return .3048;
+    return Missing;
+}
+bool comparable(const WellIntervalOccurrence &a,const WellIntervalOccurrence &b) {
+    return (a.depthType=="MD"||a.depthType=="TVD"||a.depthType=="TVDSS")&&
+        a.depthType==b.depthType&&finite(depthScale(a))&&finite(depthScale(b));
 }
 bool strictlyIncreasing(const std::array<double, 3>& f, double lo, double hi)
 {
@@ -133,13 +148,17 @@ std::vector<FrameworkIssue> validate(const StratigraphicScheme& s)
         unique(sub.id.value, "子层段");
         if (!findInterval(s, sub.interval)) issue(out, "error", "orphan_subinterval", sub.id.value, "子层段引用不存在的父单元");
     }
-    std::set<std::pair<long long, std::string>> seen;
+    std::set<std::string> occurrenceIds;
+    std::map<std::pair<long long,std::string>,std::vector<const WellIntervalOccurrence*>> repeated;
     std::map<long long, std::vector<const WellIntervalOccurrence*>> perWell;
     for (const auto& o : s.wellOccurrences) {
         const auto* iv = findInterval(s, o.interval);
         if (!iv) { issue(out, "error", "orphan_occurrence", o.interval.value, "井出现引用不存在的父单元"); continue; }
-        if (!seen.insert({o.wellId, o.interval.value}).second)
-            issue(out, "error", "duplicate_occurrence", o.interval.value, "同一井同一父单元重复");
+        if(!o.occurrenceId.empty()&&(!occurrenceIds.insert(o.occurrenceId).second||o.occurrenceId.size()>256||
+           o.occurrenceId.find('\0')!=std::string::npos))
+            issue(out,"error","duplicate_occurrence_id",o.interval.value,"井出现身份重复或无效");
+        auto &previous=repeated[{o.wellId,o.interval.value}];
+        previous.push_back(&o);
         if (finite(o.top) && finite(o.bottom) && !(o.bottom > o.top) && o.status != "pinched_out")
             issue(out, "error", "inverted", o.interval.value, "井 " + std::to_string(o.wellId) + " 顶底倒置或零厚度（尖灭请显式标 pinched_out）");
         double prev = o.top;
@@ -151,14 +170,36 @@ std::vector<FrameworkIssue> validate(const StratigraphicScheme& s)
         }
         perWell[o.wellId].push_back(&o);
     }
+    for(auto &[key,occurrences]:repeated) {
+        if(occurrences.size()<2)continue;
+        if(std::any_of(occurrences.begin(),occurrences.end(),[&](const auto *value){
+            return !comparable(*occurrences.front(),*value)||!finite(value->top)||!finite(value->bottom);})) {
+            issue(out,"error","ambiguous_occurrence",key.second,"多次井出现缺少共同轴、已知单位或完整范围");continue;
+        }
+        std::sort(occurrences.begin(),occurrences.end(),[](const auto *a,const auto *b){
+            return a->top*depthScale(*a)<b->top*depthScale(*b);});
+        for(std::size_t index=1;index<occurrences.size();++index)
+            if((occurrences[index-1]->top*depthScale(*occurrences[index-1])==occurrences[index]->top*depthScale(*occurrences[index])&&
+                occurrences[index-1]->bottom*depthScale(*occurrences[index-1])==occurrences[index]->bottom*depthScale(*occurrences[index]))||
+               occurrences[index-1]->bottom*depthScale(*occurrences[index-1])>occurrences[index]->top*depthScale(*occurrences[index]))
+                issue(out,"error","duplicate_occurrence",key.second,"同一井同一父单元出现重叠；须明确实际区间");
+    }
     for (auto& [well, list] : perWell) {
-        std::sort(list.begin(), list.end(), [&](auto* a, auto* b) { return findInterval(s, a->interval)->order < findInterval(s, b->interval)->order; });
+        const auto orderKey=[&](const auto *occurrence) {
+            const bool known=finite(depthScale(*occurrence))&&finite(occurrence->top);
+            return std::make_tuple(occurrence->depthType,known?0:1,known?occurrence->top*depthScale(*occurrence):0.,
+                                  findInterval(s,occurrence->interval)->order);
+        };
+        std::stable_sort(list.begin(), list.end(), [&](auto* a, auto* b) {
+            return orderKey(a)<orderKey(b);
+        });
         for (std::size_t k = 0; k + 1 < list.size(); ++k) {
             const auto* a = list[k]; const auto* b = list[k + 1];
+            if(!comparable(*a,*b))continue;
             if (findInterval(s, b->interval)->order != findInterval(s, a->interval)->order + 1) continue;
             if (!finite(a->bottom) || !finite(b->top)) continue;
-            if (a->bottom > b->top + 1e-6) issue(out, "error", "overlap", b->interval.value, "井 " + std::to_string(well) + " 相邻父单元重叠");
-            else if (b->top > a->bottom + 1e-6 && a->status != "faulted" && b->status != "faulted")
+            if (a->bottom*depthScale(*a) > b->top*depthScale(*b) + 1e-6) issue(out, "error", "overlap", b->interval.value, "井 " + std::to_string(well) + " 相邻父单元重叠");
+            else if (b->top*depthScale(*b) > a->bottom*depthScale(*a) + 1e-6 && a->status != "faulted" && b->status != "faulted")
                 issue(out, "warning", "gap", b->interval.value, "井 " + std::to_string(well) + " 相邻父单元间存在空隙（共享界面深度不一致）");
         }
     }
@@ -241,14 +282,15 @@ std::string displayName(const StratigraphicScheme& s, const SubIntervalId& id)
     return sub ? displayName(s, sub->interval) + "/S" + std::to_string(sub->index) : std::string();
 }
 
-WellSubIntervalRange wellRange(const StratigraphicScheme& s, long long wellId, const SubIntervalId& id)
+static WellSubIntervalRange rangeOf(const StratigraphicScheme& s,long long wellId,const SubIntervalId& id,
+                                  const WellIntervalOccurrence* o)
 {
     WellSubIntervalRange r;
     r.subInterval = id; r.wellId = wellId;
     const auto* sub = findSubInterval(s, id);
     if (!sub) { r.reason = "未知子层段"; return r; }
+    if(sub->index<1||sub->index>SubIntervalCount){r.reason="子层段序号无效";return r;}
     r.interval = sub->interval; r.index = sub->index;
-    const auto* o = occurrenceOf(s, wellId, sub->interval);
     if (!o) { r.reason = "该井没有此父单元的分层记录"; return r; }
     r.depthType = o->depthType; r.depthUnit = o->depthUnit;
     if (o->status == "pinched_out") { r.reason = "父单元在该井尖灭"; return r; }
@@ -274,9 +316,34 @@ WellSubIntervalRange wellRange(const StratigraphicScheme& s, long long wellId, c
     return r;
 }
 
+WellSubIntervalRange wellRange(const StratigraphicScheme& s,long long wellId,const SubIntervalId& id) {
+    const auto *sub=findSubInterval(s,id);
+    const auto *occurrence=sub?occurrenceOf(s,wellId,sub->interval):nullptr;
+    auto result=rangeOf(s,wellId,id,occurrence);
+    if(sub&&!occurrence&&std::count_if(s.wellOccurrences.begin(),s.wellOccurrences.end(),[&](const auto &o){
+        return o.wellId==wellId&&o.interval==sub->interval;})>1)result.reason="该井此父单元有多次出现，须给精确 occurrenceId";
+    return result;
+}
+WellSubIntervalRange wellRangeForOccurrence(const StratigraphicScheme& s,long long wellId,const SubIntervalId& id,
+                                           const std::string& occurrenceId) {
+    const auto *sub=findSubInterval(s,id);const WellIntervalOccurrence *selected=nullptr;
+    for(const auto &occurrence:s.wellOccurrences)if(!occurrenceId.empty()&&occurrence.occurrenceId==occurrenceId) {
+        if(selected){auto result=rangeOf(s,wellId,id,nullptr);result.reason="井出现身份重复";return result;}
+        selected=&occurrence;
+    }
+    if(!sub||!selected||selected->wellId!=wellId||selected->interval!=sub->interval) {
+        auto result=rangeOf(s,wellId,id,nullptr);result.reason="井出现身份缺失、失效或不属于当前井和父单元";return result;
+    }
+    return rangeOf(s,wellId,id,selected);
+}
+
 bool setWellInternalBoundaries(StratigraphicScheme& s, long long wellId, const IntervalId& interval,
                                const std::array<double, 3>& depths, const std::string& status, std::string& error)
 {
+    if(std::count_if(s.wellOccurrences.begin(),s.wellOccurrences.end(),[&](const auto &occurrence){
+        return occurrence.wellId==wellId&&occurrence.interval==interval;})>1) {
+        error="该井此父单元有多次出现，未选择出现时不能修改首条";return false;
+    }
     for (auto& o : s.wellOccurrences) {
         if (o.wellId != wellId || !(o.interval == interval)) continue;
         if (!finite(o.top) || !finite(o.bottom)) { error = "父单元顶底不完整，不能设置内部分界"; return false; }
@@ -338,7 +405,7 @@ std::string subIntervalFingerprint(const StratigraphicScheme& s, const SubInterv
         for (int k = 0; k < 3; ++k) if (edge(k)) text << '|' << num(d->fractions[k]);
     for (const auto& o : s.wellOccurrences) {
         if (!(o.interval == sub->interval)) continue;
-        const auto r = wellRange(s, o.wellId, id);
+        const auto r = rangeOf(s,o.wellId,id,&o);
         text << "|w" << o.wellId << ':' << o.depthType << o.depthUnit << (r.resolved ? 1 : 0) << num(r.top) << ',' << num(r.bottom);
     }
     return fnv(text.str());
@@ -349,6 +416,18 @@ std::string wellSubIntervalFingerprint(const StratigraphicScheme& s, const SubIn
     const auto* sub=findSubInterval(s,id);
     const auto* interval=sub?findInterval(s,sub->interval):nullptr;
     if(!interval || wellId<=0)return {};
+    std::vector<const WellIntervalOccurrence*> occurrences;
+    for(const auto &occurrence:s.wellOccurrences)if(occurrence.wellId==wellId&&occurrence.interval==sub->interval)
+        occurrences.push_back(&occurrence);
+    if(occurrences.size()>1) {
+        std::sort(occurrences.begin(),occurrences.end(),[](const auto *a,const auto *b){return a->occurrenceId<b->occurrenceId;});
+        std::ostringstream values;values<<"well-md-occurrences-v1|"<<id.value<<'|'<<wellId<<'|'<<sub->index<<'|'<<sub->status
+            <<'|'<<interval->top.value<<'|'<<interval->bottom.value<<'|'<<interval->status;
+        for(const auto *occurrence:occurrences){const auto range=rangeOf(s,wellId,id,occurrence);
+            values<<'|'<<occurrence->occurrenceId<<'|'<<range.depthType<<'|'<<range.depthUnit<<'|'<<range.resolved
+                  <<'|'<<num(range.top)<<'|'<<num(range.bottom);}
+        return fnv(values.str());
+    }
     const auto range=wellRange(s,wellId,id);
     std::ostringstream text;
     text<<"well-md-v1|"<<id.value<<'|'<<sub->index<<'|'<<sub->status<<'|'<<interval->top.value<<'|'<<interval->bottom.value

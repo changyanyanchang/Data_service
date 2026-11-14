@@ -80,6 +80,7 @@ struct WellIntervalOccurrence {
     // complete|top_missing|not_penetrated|pinched_out|faulted|pending
     std::string status = "complete";
     std::string evidenceJson;
+    std::string occurrenceId; // Durable identity in immutable revisions; assigned on commit, preserved on edits.
 };
 
 // 地层方案（一个修订即一个不可变快照）。
@@ -284,6 +285,9 @@ const StratigraphicSubInterval* resolveSubInterval(const StratigraphicScheme& sc
 std::string displayName(const StratigraphicScheme& scheme, const IntervalId& id);
 std::string displayName(const StratigraphicScheme& scheme, const SubIntervalId& id);
 WellSubIntervalRange wellRange(const StratigraphicScheme& scheme, long long wellId, const SubIntervalId& id);
+// Multiple occurrences require an exact durable ID. Missing/foreign/duplicate IDs never fall back to a first range.
+WellSubIntervalRange wellRangeForOccurrence(const StratigraphicScheme& scheme,long long wellId,
+                                          const SubIntervalId& id,const std::string& occurrenceId);
 // 设置某井内部三个分界（解释约束）；拒绝逆序、越出父单元、重叠。
 bool setWellInternalBoundaries(StratigraphicScheme& scheme, long long wellId, const IntervalId& interval,
                                const std::array<double, 3>& depths, const std::string& status, std::string& error);
