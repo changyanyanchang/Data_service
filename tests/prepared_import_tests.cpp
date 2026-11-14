@@ -81,6 +81,9 @@ static void checkPreparedSegyRelocation(const QTemporaryDir& temp) {
     QSqlDatabase::removeDatabase(connection);
   }
   check(!service.commitSourceRelocation(*prepared,error),"source-row CAS rejects stale plan");
+  check(error.find("StaleModelGeneration")!=std::string::npos,"A writable reopen after unmanaged SQL fences the original writer");
+  service.closeProject();
+  check(service.openProjectForSourceRelocation(*prepared,error),"Explicitly reopen the stale writer without unrelated coordinate normalization");
   check(service.verifySource(sourceId,error),error);
   std::vector<DataEntry> volumes;
   check(service.listData("volumes",0,volumes,error)&&volumes.size()==1,"prepared volume registered");

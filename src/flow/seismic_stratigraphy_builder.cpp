@@ -1234,7 +1234,7 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
                     QFileInfo(axis.value(4).toString()).suffix().compare("las",Qt::CaseInsensitive)==0)depth.depthType="MD";
                 if(!sameDepth(rangeDepth,depth))continue;
                 const auto sourceSamples=axis.value(1).toLongLong();
-                if(sourceSamples<0 || cids.size()>64 || (cids.size() && sourceSamples>query.maxValues/static_cast<long long>(cids.size()))) {
+                if(sourceSamples<0 || cids.size()>64) {
                     error="候选曲线组超过解码预算，请缩小曲线集合";return false;
                 }
                 if (cids.size() > bestSetCount) {
@@ -1248,8 +1248,10 @@ bool DataService::queryWellLogsByStratigraphy(const WellIntervalLogQuery& query,
             if (bestSetId > 0) {
                 std::string featErr;
                 WellFeatureTable rawTable;
+                CurveReadOptions readOptions;readOptions.cancelled=stopped;
+                readOptions.maxSamples=std::min<long long>(query.maxSamplesPerWell,(query.maxValues-usedValues)/static_cast<long long>(curvesBySet[bestSetId].size()));
                 if (prepareWellFeatures(wellId, curvesBySet[bestSetId], slice.topDepth, slice.bottomDepth,
-                                        query.processed, rawTable, featErr)) {
+                                        query.processed, rawTable, featErr, readOptions)) {
                     if(stopped() || !charge(rawTable.depths.size(),rawTable.columns.size()))return false;
                     if((query.resampleStepMeters>0 || query.normalizedSampleCount>0) &&
                        std::adjacent_find(rawTable.depths.begin(),rawTable.depths.end(),[](double a,double b){return b<=a;})!=rawTable.depths.end()) {

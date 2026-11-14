@@ -2,5 +2,8 @@
 include(CMakeFindDependencyMacro)
 find_dependency(Qt6 COMPONENTS Core Gui Sql)
 find_dependency(ZLIB)
+if(NOT "@PDS_ZSTD_TARGET@" STREQUAL "")
+  find_dependency(zstd CONFIG)
+endif()
 include("${CMAKE_CURRENT_LIST_DIR}/PaleoDataServiceTargets.cmake")
 check_required_components(PaleoDataService)

@@ -1,6 +1,7 @@
 #include "project_store.h"
 #include "interpretation_store.h"
 #include "object_revision_schema.h"
+#include "model_change_journal.h"
 #include <QDir>
 #include <QFileInfo>
 #include <QSqlError>
@@ -29,13 +30,12 @@ DepthInfo readDepth(const QJsonObject& o){DepthInfo d;d.depthType=s(o["type"].to
 QJsonArray measurementsJson(const std::vector<Measurement>& a){QJsonArray out;for(auto& m:a)out.append(QJsonObject{{"name",q(m.measurementName)},{"unit",q(m.measurementUnit)},{"value",std::isfinite(m.numericValue)?QJsonValue(m.numericValue):QJsonValue()},{"text",q(m.originalText)}});return out;}
 std::vector<Measurement> readMeasurements(const QJsonArray& a){std::vector<Measurement> out;for(auto v:a){auto o=v.toObject();Measurement m;m.measurementName=s(o["name"].toString());m.measurementUnit=s(o["unit"].toString());m.numericValue=o["value"].isDouble()?o["value"].toDouble():Missing;m.originalText=s(o["text"].toString());out.push_back(m);}return out;}
 bool ProjectStore::exec(const QString& sql,const QVariantList& args,std::string& error,QSqlQuery* result)const{
-    if(!db.isOpen()){error="请先打开工区";return false;}QSqlQuery query(db);if(!query.prepare(sql)){error=s(query.lastError().text());return false;}for(const auto& a:args)query.addBindValue(a);
-    if(!query.exec()){error=s(query.lastError().text());return false;}if(result)*result=std::move(query);return true;
+    return executeJournalled(*this,sql,args,error,result);
 }
 bool ProjectStore::begin(std::string& e){return exec("BEGIN IMMEDIATE",{},e);}
 bool ProjectStore::commit(std::string& e){return exec("COMMIT",{},e);}
 void ProjectStore::rollback(){std::string ignore;exec("ROLLBACK",{},ignore);}
-void ProjectStore::close(){if(db.isValid()){db.close();db=QSqlDatabase();}if(!connection.isEmpty())QSqlDatabase::removeDatabase(connection);connection.clear();root.clear();name.clear();readOnly=false;}
+void ProjectStore::close(){if(db.isValid()){db.close();db=QSqlDatabase();}if(!connection.isEmpty())QSqlDatabase::removeDatabase(connection);connection.clear();root.clear();name.clear();readOnly=false;journalReady=false;journalBypass=false;journalTransaction=false;journalOuterSavepoint.clear();journalWriteLease={};journalSchemaCookie=-1;journalStoreId.clear();journalGeneration.clear();journalFileIdentity.clear();journalWriteActivated=false;}
 QString ProjectStore::absolutePath(const QString& p)const{return QFileInfo(p).isAbsolute()?p:QDir(root).absoluteFilePath(p);}
 // Additive and once per database: preserve IDs, manual edits and the original schema version.
 static bool ensureImportPerformanceSchema(ProjectStore& st,std::string& error){
@@ -95,13 +95,20 @@ static bool ensureCoordinateSystemSchema(ProjectStore& st,std::string& error){
 bool ProjectStore::open(const QString& directory,bool create,const QString& projectName,std::string& error,bool readonly){
     close();error.clear();QDir dir(directory);if(create){if(QFileInfo::exists(dir.filePath("data.sqlite"))){error="该目录已有工区，请使用打开工区";return false;}if(!dir.mkpath(".")){error="无法创建工区目录";return false;}}
     if(!create&&!QFileInfo::exists(dir.filePath("data.sqlite"))){error="目录中没有 data.sqlite";return false;}
+    ModelWriteLease openGate;if(!readonly){openGate=tryAcquireModelWriteLease(s(dir.absolutePath()),5000,error);if(!openGate)return false;}
     readOnly=readonly;root=dir.absolutePath();static std::atomic<long long> serial{0};connection=QString("paleo_data_%1").arg(++serial);
     db=QSqlDatabase::addDatabase("QSQLITE",connection);db.setDatabaseName(dir.filePath("data.sqlite"));
     if(readOnly)db.setConnectOptions("QSQLITE_OPEN_READONLY");
     if(!db.open()){error=s(db.lastError().text());close();return false;}
-    if(!exec("PRAGMA foreign_keys=ON",{},error)||!exec("PRAGMA busy_timeout=5000",{},error)||(!readOnly&&!exec("PRAGMA journal_mode=WAL",{},error))){close();return false;}
+    if(!create&&!readOnly){QSqlQuery version;if(!exec("SELECT value FROM ds_meta WHERE key='model_change_schema'",{},error,&version)){close();return false;}if(version.next()&&version.value(0).toString()!="1"){error="UnsupportedModelChangeVersion: writes refused";close();return false;}}
+    if(!exec("PRAGMA foreign_keys=ON",{},error)||!exec("PRAGMA busy_timeout=5000",{},error)||(!readOnly&&(!exec("PRAGMA journal_mode=WAL",{},error)||!exec("PRAGMA synchronous=FULL",{},error)))){close();return false;}
     if(!create){QSqlQuery r;if(!exec("SELECT value FROM ds_meta WHERE key='schema_version'",{},error,&r)||!r.next()||r.value(0).toInt()!=1){error="工区格式不受支持";close();return false;}if(!exec("SELECT value FROM ds_meta WHERE key='project_name'",{},error,&r))return false;if(r.next())name=r.value(0).toString();
         if(readOnly)return true;
+        r.finish();
+        // Existing triggers must see managed SDK schema/metadata maintenance.
+        QSqlQuery journalVersion;if(!exec("SELECT value FROM ds_meta WHERE key='model_change_schema'",{},error,&journalVersion))return false;
+        const bool hasJournal=journalVersion.next();journalVersion.finish();
+        if(hasJournal&&!ensureModelChangeJournal(*this,error)){close();return false;}
         // Additive upgrade: keep existing rows/IDs and handwritten edits intact.
         r.finish();bool hasSheet=false;
         if(!exec("PRAGMA table_info(log_sets)",{},error,&r))return false;
@@ -113,7 +120,7 @@ bool ProjectStore::open(const QString& directory,bool create,const QString& proj
             while(r.next())if(r.value(1).toString()=="sheet")hasSheet=true;r.finish();
             if((!hasSheet&&!exec("ALTER TABLE log_sets ADD COLUMN sheet TEXT DEFAULT ''",{},error))||!commit(error)){rollback();return false;}
         }
-        if(!ensureImportPerformanceSchema(*this,error)||!ensureFileGraphSchema(*this,error)||!ensureCoordinateSystemSchema(*this,error)||!interpretation::ensureSchema(*this,error)||!ensureObjectRevisionSchema(*this,error)){close();return false;}return true;
+        if(!ensureImportPerformanceSchema(*this,error)||!ensureFileGraphSchema(*this,error)||!ensureCoordinateSystemSchema(*this,error)||!interpretation::ensureSchema(*this,error)||!ensureObjectRevisionSchema(*this,error)||(!journalReady&&!ensureModelChangeJournal(*this,error))){close();return false;}return true;
     }
     const QString schema=QString::fromUtf8(R"SQL(
 CREATE TABLE ds_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -143,7 +150,7 @@ CREATE TABLE source_cells(table_id INTEGER REFERENCES source_tables(id) ON DELET
 CREATE TABLE changes(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT,entity_id INTEGER,description TEXT,created TEXT DEFAULT CURRENT_TIMESTAMP);
 )SQL");
     if(!begin(error))return false;for(auto statement:schema.split(';',Qt::SkipEmptyParts)){statement=statement.trimmed();if(statement.isEmpty())continue;if(!exec(statement,{},error)){rollback();return false;}}
-    if(!exec("INSERT INTO ds_meta VALUES('schema_version','1'),('project_name',?)",{projectName},error)||!commit(error)){rollback();return false;}name=projectName;dir.mkpath("sources");dir.mkpath("images");dir.mkpath("exports");if(!ensureImportPerformanceSchema(*this,error)||!ensureFileGraphSchema(*this,error)||!ensureCoordinateSystemSchema(*this,error)||!interpretation::ensureSchema(*this,error)||!ensureObjectRevisionSchema(*this,error)){close();return false;}return true;
+    if(!exec("INSERT INTO ds_meta VALUES('schema_version','1'),('project_name',?)",{projectName},error)||!commit(error)){rollback();return false;}name=projectName;dir.mkpath("sources");dir.mkpath("images");dir.mkpath("exports");if(!ensureImportPerformanceSchema(*this,error)||!ensureFileGraphSchema(*this,error)||!ensureCoordinateSystemSchema(*this,error)||!interpretation::ensureSchema(*this,error)||!ensureObjectRevisionSchema(*this,error)||!ensureModelChangeJournal(*this,error)){close();return false;}return true;
 }
 bool ProjectStore::ensureWell(const WellInfo& w,long long& id,std::string& e){
     if(w.wellName.empty()){e="井名为空，不能保存";return false;}QSqlQuery r;

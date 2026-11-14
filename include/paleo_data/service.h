@@ -8,6 +8,8 @@
 #include "stratigraphic_framework.h"
 #include "source_relocation.h"
 #include "object_descriptor.h"
+#include "model_changes.h"
+#include "curve_window.h"
 #include <memory>
 #include <cstdint>
 
@@ -101,6 +103,12 @@ struct CurveSlice {
     std::vector<unsigned char> quality; // 0正常、1来源空值、2阈值异常、4人工修改。
     // 计算前检查 std::isfinite(values[i]) 和质量标记。
     // 特别是读取原始值时，quality=1 的有限哨兵值仍然表示缺失，不能拿来算均值。
+};
+struct CurveWindowResult {
+    CurveSlice curve;
+    DepthInfo depthInfo;
+    std::vector<double> tvdValues, tvdssValues;
+    long long firstSample=0, totalSamples=0;
 };
 
 // Plot input keeps groups, source IDs and conventions separate. No file reparse,
@@ -303,11 +311,34 @@ public:
     bool readTimeDepthAtRevision(long long id,const std::string& revision,TimeDepthTable& result,std::string& error,
                                  const CancelCheck& cancelled={},long long maxPoints=1000000) const;
     bool readTable(const std::string& kind, long long id, long long offset, int limit, DataTable& result, std::string& error) const;
+    // Persisted metadata after-images only; never restores historical numeric arrays.
+    // Missing legacy journal reports available=false; unmanaged writes require rebuild.
+    bool readModelChangeHead(ModelChangeHead& result,std::string& error) const;
+    bool readModelChanges(const ModelChangeQuery& query,ModelChangePage& result,std::string& error) const;
+    // Prepared-model publication starts a distinct generation; values and storeId stay unchanged.
+    bool forkModelGeneration(const ModelChangeHead& expected,ModelChangeHead& renewed,std::string& error);
     // 真正读取曲线数组。范围含端点；topDepth/bottomDepth 为 Missing 时不限制相应端。
     // processed=true 读取处理值，false 读取原值；两种模式都返回 rawValues 与 quality。
     // ID来自 listData；同名曲线可能属于不同组，调用者需先选定来源/曲线组。
     bool readCurveSlice(long long curveId, double topDepth, double bottomDepth,
                         bool processed, CurveSlice& result, std::string& error) const;
+    bool readCurveSlice(long long curveId,double topDepth,double bottomDepth,bool processed,
+                        CurveSlice& result,std::string& error,const CurveReadOptions& options,
+                        CurveReadStats* stats=nullptr) const;
+    // Sample-index window; preserves optional TVD/TVDSS arrays and depth conventions.
+    // No interpolation, sorting, unit conversion or implicit migration.
+    bool readCurveWindow(const CurveWindowQuery& query,CurveWindowResult& result,std::string& error,
+                         const CurveReadOptions& options={},CurveReadStats* stats=nullptr) const;
+    // Depth filtering preserves source order and auxiliary axes; firstSample is -1.
+    bool readCurveDepthWindow(long long curveId,double top,double bottom,bool processed,
+                              CurveWindowResult& result,std::string& error,
+                              const CurveReadOptions& options={},CurveReadStats* stats=nullptr) const;
+    bool readCurveTableWindow(long long curveId,long long offset,int limit,DataTable& result,
+                              std::string& error,const CurveReadOptions& options={},CurveReadStats* stats=nullptr) const;
+    // Explicit bounded legacy migration; read-only opens never create the chunk schema.
+    // Budget is the sum of legacy payloads materialized, not a physical/RSS bound.
+    bool upgradeCurveWindowStorage(std::string& error,const CancelCheck& cancelled={},
+                                   long long maxLegacyBytes=64LL*1024*1024);
     // 曲线组编号来自 DataEntry.parentId。完整返回共同深度/TVD/TVDSS轴、曲线及来源工作表。
     bool readLogSet(long long logSetId, bool processed, LogSet& result, std::string& error) const;
     // 根据已核对资料补充深度约定；空字段保留原值，已有非空约定不可仅改标签。
@@ -323,6 +354,8 @@ public:
     // 将同一口井、同一曲线组共享深度轴的曲线组合为特征表。
     // 只准备数据，不隐式插值、换单位或执行地质分类模型。
     bool prepareWellFeatures(long long wellId, const std::vector<long long>& curveIds, double topDepth, double bottomDepth, bool processed, WellFeatureTable& result, std::string& error) const;
+    bool prepareWellFeatures(long long wellId,const std::vector<long long>& curveIds,double topDepth,double bottomDepth,
+                             bool processed,WellFeatureTable& result,std::string& error,const CurveReadOptions& options) const;
     bool compareIntervals(const std::vector<long long>& trackIds, double topDepth, double bottomDepth, std::vector<IntervalTrackResult>& result, std::string& error) const;
     bool findMaps(const std::string& area, const std::string& type, const std::string& stratum, std::vector<GeologicalMap>& result, std::string& error) const;
     bool saveInterval(long long trackId, IntervalRecord& interval, std::string& error);
@@ -539,6 +572,7 @@ public:
                                      std::vector<WellStratigraphicLogSlice>& results,
                                      std::string& error) const;
 private:
+    // Internal state is thread-affine; change pages contain metadata only.
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

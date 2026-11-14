@@ -26,6 +26,12 @@ public:
     QSqlDatabase db;
     QString root, name, connection;
     bool readOnly=false;
+    mutable bool journalReady=false, journalBypass=false, journalTransaction=false;
+    mutable QString journalOuterSavepoint;
+    mutable ModelWriteLease journalWriteLease;
+    mutable long long journalSchemaCookie=-1;
+    mutable QString journalStoreId, journalGeneration, journalFileIdentity;
+    mutable bool journalWriteActivated=false;
     ~ProjectStore(){close();}
     bool open(const QString& directory,bool create,const QString& projectName,std::string& error,bool readOnly=false);
     void close();

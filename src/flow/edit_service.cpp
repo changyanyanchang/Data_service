@@ -1,4 +1,5 @@
 #include "store/project_store.h"
+#include "store/curve_windows.h"
 #include "planar_coordinates.h"
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -55,12 +56,12 @@ bool DataService::cleanCurve(long long id,const CurveCleaningRule& rule,std::str
     auto clean=raw;QByteArray quality(qsizetype(raw.size()),char(0));long long flagged=0;
     for(size_t i=0;i<raw.size();++i){double v=raw[i];bool missing=!std::isfinite(v)||std::find(nulls.begin(),nulls.end(),v)!=nulls.end();if(missing){clean[i]=Missing;quality[qsizetype(i)]=1;continue;}if((rule.checkMinimum&&v<rule.minimum)||(rule.checkMaximum&&v>rule.maximum)){++flagged;quality[qsizetype(i)]=2;if(rule.replaceInvalidWithMissing)clean[i]=Missing;}}
     QJsonArray configured;for(double v:rule.nullValues)configured.append(v);stored["curve"]=q(rule.curveType);stored["unit"]=q(rule.unit);stored["nulls"]=configured;stored["checkMinimum"]=rule.checkMinimum;stored["minimum"]=rule.minimum;stored["checkMaximum"]=rule.checkMaximum;stored["maximum"]=rule.maximum;stored["replace"]=rule.replaceInvalidWithMissing;
-    return st.exec("UPDATE curves SET processed_values=?,quality=?,rule_json=? WHERE id=?",{pack(clean),quality,json(stored),id},e)&&recordChange(st,"curve",id,QString("重新清理（基于原始值），标记 %1 个样点；规则 %2").arg(flagged).arg(json(stored)),e)&&transaction.commit(e);
+    return st.exec("UPDATE curves SET processed_values=?,quality=?,rule_json=? WHERE id=?",{pack(clean),quality,json(stored),id},e)&&refreshCurveValueWindows(st,id,e)&&recordChange(st,"curve",id,QString("重新清理（基于原始值），标记 %1 个样点；规则 %2").arg(flagged).arg(json(stored)),e)&&transaction.commit(e);
 }
 bool DataService::updateCurveValue(long long id,long long index,double v,std::string& e){
     if(std::isinf(v)){e="不允许写入无穷值";return false;}auto& st=impl_->store;Transaction transaction(st,e);if(!transaction.active)return false;QSqlQuery r;if(!st.exec("SELECT raw_values,processed_values,quality FROM curves WHERE id=?",{id},e,&r))return false;if(!r.next()){e="曲线不存在";return false;}
     std::vector<double> current;if(!unpack((r.value(1).isNull()?r.value(0):r.value(1)).toByteArray(),current,e))return false;if(index<0||index>=static_cast<long long>(current.size())){e="样点索引越界";return false;}auto quality=r.value(2).toByteArray();if(size_t(quality.size())!=current.size()){e="质量数组长度损坏";return false;}double old=current[size_t(index)];current[size_t(index)]=v;quality[qsizetype(index)]=4;
-    return st.exec("UPDATE curves SET processed_values=?,quality=? WHERE id=?",{pack(current),quality,id},e)&&recordChange(st,"curve",id,QString("样点 %1：%2 → %3").arg(index).arg(std::isfinite(old)?QString::number(old,'g',17):"Missing").arg(std::isfinite(v)?QString::number(v,'g',17):"Missing"),e)&&transaction.commit(e);
+    return st.exec("UPDATE curves SET processed_values=?,quality=? WHERE id=?",{pack(current),quality,id},e)&&refreshCurveValueWindows(st,id,e)&&recordChange(st,"curve",id,QString("样点 %1：%2 → %3").arg(index).arg(std::isfinite(old)?QString::number(old,'g',17):"Missing").arg(std::isfinite(v)?QString::number(v,'g',17):"Missing"),e)&&transaction.commit(e);
 }
 bool DataService::resetCurve(long long id,std::string& e){CurveCleaningRule rule;return cleanCurve(id,rule,e);}
 bool DataService::saveCurveUnit(long long id,const std::string& unit,std::string& e){
