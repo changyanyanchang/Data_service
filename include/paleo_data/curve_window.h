@@ -17,11 +17,15 @@ struct CurveReadOptions {
     long long maxReadBytes=64LL*1024*1024;
     long long maxLegacyBytes=1024LL*1024;
     std::function<bool()> cancelled;
+    // Both zero keep legacy metadata behavior. Both positive opt in to SQL
+    // guards before TEXT materialization; maxReadBytes then includes metadata.
+    long long maxMetadataBytes=0, maxMetadataFieldBytes=0;
 };
 struct CurveReadStats {
     long long payloadBytesRead=0, legacyBytesMaterialized=0;
     long long axisBlocksRead=0, valueBlocksRead=0;
     bool chunked=false;
+    long long metadataBytesRead=0; // Actual UTF-8 metadata handed to C++, not physical disk I/O.
 };
 struct CurveWindowQuery {
     long long curveId=0, firstSample=0, sampleCount=5000;

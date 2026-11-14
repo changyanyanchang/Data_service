@@ -10,6 +10,7 @@
 #include "object_descriptor.h"
 #include "model_changes.h"
 #include "curve_window.h"
+#include "metadata_read.h"
 #include <memory>
 #include <cstdint>
 
@@ -82,6 +83,8 @@ struct SourceIndexEntry {
     std::string sha256;
     bool active=true; // false retains import history; never project it as current data.
 };
+// New bounded callers opt in; the original SourceIndexEntry layout and the
+// three-argument compatibility method retain their existing ABI/semantics.
 struct IssueEntry { long long id=0, sourceId=0; std::string code, message, originalText, sheet, resolution; int row=0; bool blocking=false, resolved=false; };
 // 通用的分页展示表。rows 是本页内容，totalRows 是总行数；表格值统一为文字。
 // 算法计算优先使用下方带 double/vector 字段的专用结果对象。
@@ -320,6 +323,9 @@ public:
     // Names/details over 4096 UTF-8 bytes fail the complete page; values are never truncated.
     bool listDataPage(const std::string& kind,long long wellId,long long afterId,int limit,
                       std::vector<DataEntry>& result,bool& hasMore,std::string& error) const;
+    bool listDataPage(const std::string& kind,long long wellId,long long afterId,int limit,
+        std::vector<DataEntry>& result,bool& hasMore,std::string& error,
+        const MetadataReadOptions& options,MetadataReadStats* stats=nullptr) const;
     // Filter in SQLite, without listing every other source in the work area.
     bool listSourceData(const std::string& kind, long long sourceId, std::vector<DataEntry>& result, std::string& error) const;
     // Indexed metadata identity; never loads numeric arrays or seismic samples.
@@ -381,6 +387,8 @@ public:
     bool listSourceIndexEntries(std::vector<SourceIndexEntry>& result, std::string& error) const;
     // Indexed lookup: no enumeration of every source in a large work area.
     bool readSourceIndexEntry(long long sourceId, SourceIndexEntry& result, std::string& error) const;
+    bool readSourceIndexEntry(long long sourceId, SourceIndexEntry& result, std::string& error,
+        const SourceIndexReadOptions& options, SourceIndexReadStats* stats=nullptr) const;
     // Relations are directed from sourceId to targetSourceId. Repeating the same
     // relation updates its note and returns the existing stable relation ID.
     bool relateSources(long long sourceId, long long targetSourceId, const std::string& relation,
