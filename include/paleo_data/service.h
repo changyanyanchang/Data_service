@@ -11,6 +11,7 @@
 #include "model_changes.h"
 #include "curve_window.h"
 #include "metadata_read.h"
+#include "numeric_table.h"
 #include <memory>
 #include <cstdint>
 
@@ -334,6 +335,17 @@ public:
     bool readTimeDepthAtRevision(long long id,const std::string& revision,TimeDepthTable& result,std::string& error,
                                  const CancelCheck& cancelled={},long long maxPoints=1000000) const;
     bool readTable(const std::string& kind, long long id, long long offset, int limit, DataTable& result, std::string& error) const;
+    // Explicit metadata-only capability upgrade; read-only opens never install it.
+    bool upgradeNumericTableProjectionSchema(std::string& error,const CancelCheck& cancelled={});
+    // CAS against the observed model head and prior projection revision (empty creates only).
+    // Returns the committed revision; describe again to acquire a current read cut.
+    bool confirmNumericTableProjection(const NumericTableProjection& declaration,const ModelChangeHead& expectedHead,
+                                       const std::string& expectedRevision,std::string& revision,std::string& error,
+                                       const CancelCheck& cancelled={});
+    bool describeNumericTableProjection(long long tableId,NumericTableDescriptor& result,std::string& error,
+                                        const NumericTableReadOptions& options={},NumericTableReadStats* stats=nullptr) const;
+    bool readNumericTableWindow(const NumericTableWindowQuery& query,NumericTableWindow& result,std::string& error,
+                                const NumericTableReadOptions& options={},NumericTableReadStats* stats=nullptr) const;
     // Persisted metadata after-images only; never restores historical numeric arrays.
     // Missing legacy journal reports available=false; unmanaged writes require rebuild.
     bool readModelChangeHead(ModelChangeHead& result,std::string& error) const;

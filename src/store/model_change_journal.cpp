@@ -75,6 +75,8 @@ bool installTriggers(ProjectStore& store,std::string& error) {
                 if(table=="intervals")return touch("tracks",row+".track_id",relationSource("tracks",row+".track_id"),relationWell("tracks",row+".track_id"));
                 if(table=="horizon_points")return touch("horizons",row+".horizon_id",relationSource("horizons",row+".horizon_id"));
                 if(table=="source_cells")return touch("source_tables",row+".table_id",relationSource("source_tables",row+".table_id"));
+                if(table=="numeric_table_projections"||table=="numeric_table_columns")
+                    return touch("source_tables",row+".table_id",relationSource("source_tables",row+".table_id"));
                 if(table=="samples")return touch("sample_tables",row+".table_id",relationSource("sample_tables",row+".table_id"),relationWell("sample_tables",row+".table_id"));
                 if(table=="measurements")return dirty("'store'","0","0");
                 if(table=="source_relations")return source(sid)+source(row+".target_source_id");
@@ -155,7 +157,18 @@ bool objectImage(ProjectStore& store,const QString& kind,long long id,QJsonObjec
     else if(kind=="maps"){sql="SELECT id,source_id,name,type,strata,crs,geo_status,geo_file FROM maps WHERE id=?";keys={"id","sourceId","name","type","strata","crs","geoStatus","geoFile"};}
     else if(kind=="sections"){sql="SELECT id,name,volume_id,crs,unit FROM sections WHERE id=?";keys={"id","name","volumeId","crs","unit"};}
     else {out["requiresRebuild"]=true;return true;}
-    QJsonArray values;if(!rows(store,sql,{id},keys,values,error))return false;deleted=values.empty();if(!deleted)out["value"]=values.first();else out["deleted"]=true;return true;
+    QJsonArray values;if(!rows(store,sql,{id},keys,values,error))return false;deleted=values.empty();if(!deleted)out["value"]=values.first();else out["deleted"]=true;
+    if(kind=="source_tables"&&!deleted) {
+        QSqlQuery schema;if(!raw(store,"SELECT name FROM sqlite_master WHERE type='table' AND name='numeric_table_projections'",{},error,&schema))return false;
+        const bool present=schema.next();schema.finish();
+        if(present) {
+            QJsonArray projection;
+            if(!rows(store,"SELECT revision,contract,first_row,row_count,column_count,stale FROM numeric_table_projections WHERE table_id=?",
+                {id},{"revision","contract","firstSourceRow","rowCount","columns","stale"},projection,error))return false;
+            if(!projection.empty())out["numericProjection"]=projection.first();
+        }
+    }
+    return true;
 }
 bool activate(const ProjectStore& store,std::string& error) {
     QSqlQuery version;if(!raw(store,"SELECT value FROM ds_meta WHERE key='model_change_schema'",{},error,&version)||!version.next()||version.value(0).toString()!="1"){error="UnsupportedModelChangeVersion: writes refused";return false;}version.finish();
