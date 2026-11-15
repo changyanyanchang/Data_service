@@ -29,12 +29,17 @@ bool identifier(const std::string& text) {
 bool revisionValid(const std::string& text) {
     return utf8(text,36)&&text.size()==36&&s(QUuid(q(text)).toString(QUuid::WithoutBraces))==text;
 }
+QByteArray encodedNulls(const NumericTableColumn& column) {
+    QJsonArray values;for(const auto& text:column.nullTexts)values.append(q(text));
+    return QJsonDocument(values).toJson(QJsonDocument::Compact);
+}
 bool declarationValid(const NumericTableProjection& p,std::string& error) {
     if(p.tableId<=0||p.sourceId<=0||!hash(p.sourceSha256)||p.firstSourceRow<1||p.rowCount<0||
        p.rowCount>std::numeric_limits<std::int64_t>::max()-p.firstSourceRow||p.columns.empty()||p.columns.size()>NumericTableMaxColumns) {
         error="NumericTableInvalidDeclaration";return false;
     }
-    QSet<QString> names;QSet<int> positions;std::size_t metadata=0;
+    QSet<QString> names;QSet<int> positions;
+    std::size_t metadata=p.sourceSha256.size()+36+sizeof(NumericTableContract)-1;
     for(const auto& column:p.columns) {
         if(!identifier(column.id)||!utf8(column.label,256,true)||!utf8(column.unit,128)||column.sourceColumn<1||
            (column.dtype!=NumericTableDtype::Float64&&column.dtype!=NumericTableDtype::Boolean)||
@@ -43,11 +48,13 @@ bool declarationValid(const NumericTableProjection& p,std::string& error) {
         const auto unit=q(column.unit).trimmed().toCaseFolded();
         if(unit.isEmpty()||QStringList{"unknown","unspecified","undefined","?","n/a"}.contains(unit)) {error="NumericTableUnitRequired";return false;}
         names.insert(q(column.id));positions.insert(column.sourceColumn);metadata+=column.id.size()+column.label.size()+column.unit.size()+128;
-        QSet<QString> nulls;
+        QSet<QString> nulls;std::size_t nullBudget=0;
         for(const auto& text:column.nullTexts) {
             if(!utf8(text,64,true)||nulls.contains(q(text))){error="NumericTableInvalidNullRule";return false;}
-            nulls.insert(q(text));metadata+=text.size()+8;
+            nulls.insert(q(text));nullBudget+=text.size()+8;
         }
+        // Include persisted JSON escaping without relaxing the original conservative allowance.
+        metadata+=std::max(nullBudget,std::size_t(encodedNulls(column).size()));
     }
     if(metadata>16*1024){error="NumericTableMetadataBudgetExceeded";return false;}return true;
 }
@@ -64,7 +71,6 @@ bool sourceShape(const ProjectStore& store,std::int64_t id,SourceShape& result,s
     if(!row.value(4).toBool()||row.value(5).toString()!="integer"||row.value(6).toString()!="integer"||
        result.rows<0||result.columns<0||!hash(result.sha)){error="NumericTableSourceUnavailable";return false;}return true;
 }
-QJsonArray nullsJson(const NumericTableColumn& column) {QJsonArray values;for(const auto& text:column.nullTexts)values.append(q(text));return values;}
 }
 bool numericTableOptionsValid(const NumericTableReadOptions& options,std::string& error) {
     if(!metadataBudgetValid(options.metadata)||options.metadata.maxTextBytes>64*1024||options.metadata.maxFieldBytes>8192||
@@ -187,7 +193,9 @@ bool confirmNumericTable(ProjectStore& store,const NumericTableProjection& decla
     if((!exists&&!previous.empty())||(exists&&(previous.empty()||!revisionValid(old)||previous!=old))){error="NumericTableProjectionConflict";return false;}
     if(exists&&!stale) {
         NumericTableDescriptor current;NumericTableReadStats usage;
-        if(!loadNumericTableDescriptor(store,declaration.tableId,current,options,usage,error))return false;
+        auto comparisonOptions=options;
+        comparisonOptions.metadata.maxFieldBytes=8192;comparisonOptions.metadata.maxTextBytes=64*1024;
+        if(!loadNumericTableDescriptor(store,declaration.tableId,current,comparisonOptions,usage,error))return false;
         if(current.projection==declaration){if(numericTableStopped(options,error)||!transaction.commit(error))return false;revision=old;return true;}
     }
     const auto next=QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -196,7 +204,7 @@ bool confirmNumericTable(ProjectStore& store,const NumericTableProjection& decla
        !store.exec("DELETE FROM numeric_table_columns WHERE table_id=?",{qlonglong(declaration.tableId)},error))return false;
     int ordinal=0;for(const auto& column:declaration.columns) {
         if(numericTableStopped(options,error)||!store.exec("INSERT INTO numeric_table_columns VALUES(?,?,?,?,?,?,?,?,?)",
-            {qlonglong(declaration.tableId),ordinal++,q(column.id),column.sourceColumn,int(column.dtype),q(column.label),q(column.unit),column.missingIsNull,QString::fromUtf8(QJsonDocument(nullsJson(column)).toJson(QJsonDocument::Compact))},error))return false;
+            {qlonglong(declaration.tableId),ordinal++,q(column.id),column.sourceColumn,int(column.dtype),q(column.label),q(column.unit),column.missingIsNull,QString::fromUtf8(encodedNulls(column))},error))return false;
     }
     if(numericTableStopped(options,error)||!store.exec("UPDATE numeric_table_projections SET stale=0 WHERE table_id=?",{qlonglong(declaration.tableId)},error)||!transaction.commit(error))return false;
     revision=s(next);return true;

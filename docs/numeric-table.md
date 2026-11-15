@@ -69,6 +69,10 @@ Defaults: 8 MiB total returned metadata/cell text, 256 bytes per source cell,
 2 MiB typed output, 4 MiB conservative working reservation. Hard maxima are
 8 MiB text/working, 2 MiB output, 4096 bytes per cell, 8192 bytes per metadata field
 and 64 KiB total metadata. Declaration metadata is separately limited to 16 KiB.
+That declaration reservation includes the actual persisted JSON encoding of null
+texts (including escapes), the fixed identity text, and conservative column
+overhead. Confirmation compares an existing declaration under the internal hard
+metadata limits; caller-selected describe/window budgets remain unchanged.
 Limits compose: a maximum row/column count does not guarantee every representation
 fits all byte limits. Output and working reservations precede payload reads.
 

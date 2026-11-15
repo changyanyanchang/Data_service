@@ -138,6 +138,35 @@ void unselectedLargeCellsAndIndex() {
     f.edit("UPDATE source_cells SET text=? WHERE table_id=? AND row_num=1 AND col_num=1",{QString(16*1024*1024,QChar('x')),f.tableId});d=f.confirm(p,d.revision);query.expected=d.cut;
     require(!f.reader.readNumericTableWindow(query,result,f.error,{},&usage)&&usage.cellTextBytesRead==0&&result.columns.empty(),"selected oversized field rejected before materialization");
 }
+void encodedMetadataAndCasBudgets() {
+    Fixture f;f.edit("UPDATE source_tables SET columns=15 WHERE id=?",{f.tableId});
+    auto p=f.definition();p.columns.clear();
+    for(int i=0;i<15;++i) {
+        NumericTableColumn column;column.id="encoded_"+std::to_string(i);column.label="encoded";
+        column.unit="1";column.sourceColumn=i+1;
+        for(int n=0;n<8;++n)column.nullTexts.push_back(std::string(63,char(1))+char('a'+n));
+        p.columns.push_back(std::move(column));
+    }
+    const auto before=f.head();std::string revision="previous output";
+    require(!f.service.confirmNumericTableProjection(p,before,{},revision,f.error)&&revision.empty()&&
+        f.error=="NumericTableMetadataBudgetExceeded","escaped persistent null metadata must fit the declaration budget");
+    require(f.head().sequence==before.sequence,"over-budget confirmation does not advance the head");
+    NumericTableDescriptor missing;
+    require(!f.reader.describeNumericTableProjection(f.tableId,missing,f.error)&&missing.revision.empty()&&
+        f.error=="NumericTableProjectionUnavailable","over-budget confirmation leaves no partial declaration");
+    p.columns.resize(5);const auto descriptor=f.confirm(p);NumericTableDescriptor result;NumericTableReadStats usage;
+    require(f.reader.describeNumericTableProjection(f.tableId,result,f.error,{},&usage)&&
+        result.projection==p&&usage.metadataBytesRead>15*1024,"near-budget encoded declaration survives the default read budget");
+    NumericTableReadOptions tight;tight.metadata.maxTextBytes=1024;
+    require(!f.reader.describeNumericTableProjection(f.tableId,result,f.error,tight)&&result.revision.empty()&&
+        f.error=="NumericTableMetadataBudgetExceeded","internal CAS budget does not relax caller metadata limits");
+    const auto unchanged=f.head();
+    require(f.service.confirmNumericTableProjection(p,unchanged,descriptor.revision,revision,f.error)&&
+        revision==descriptor.revision&&f.head().sequence==unchanged.sequence,"encoded declaration no-op retains revision and head");
+    p.columns.resize(1);const auto changed=f.confirm(p,descriptor.revision);
+    require(changed.revision!=descriptor.revision&&f.head().sequence==unchanged.sequence+1,
+        "encoded declaration can be reduced through CAS without a source edit");
+}
 void schemaUpgradeCancellation() {
     QTemporaryDir root;DataService service;std::string error;require(service.createProject(u(root.path()+"/project"),"upgrade",error),error);
     int checks=0;require(!service.upgradeNumericTableProjectionSchema(error,[&]{return ++checks==4;})&&error=="NumericTableCancelled","schema upgrade cancellation");
@@ -164,6 +193,6 @@ void shapeRepairAndReusedIds() {
 }
 int main(int argc,char** argv) {
     QCoreApplication app(argc,argv);
-    try {valuesAndIdentity();revisionsRollbackAndReopen();snapshotAndCancellation();legacyAndInvalidDeclarations();budgetsAndStrictTypes();unselectedLargeCellsAndIndex();schemaUpgradeCancellation();shapeRepairAndReusedIds();std::cout<<"numeric_table_contract passed\n";return 0;}
+    try {valuesAndIdentity();revisionsRollbackAndReopen();snapshotAndCancellation();legacyAndInvalidDeclarations();budgetsAndStrictTypes();unselectedLargeCellsAndIndex();encodedMetadataAndCasBudgets();schemaUpgradeCancellation();shapeRepairAndReusedIds();std::cout<<"numeric_table_contract passed\n";return 0;}
     catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }
