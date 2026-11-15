@@ -12,6 +12,7 @@
 #include "curve_window.h"
 #include "metadata_read.h"
 #include "numeric_table.h"
+#include "seismic_window.h"
 #include <memory>
 #include <cstdint>
 
@@ -509,6 +510,16 @@ public:
     // 按文件位置读取单道，既不要求已知CRS，也不要求规则三维网格。
     bool readSeismicTrace(long long volumeId, long long traceIndex, const SeismicTraceReadOptions& options,
                           SeismicTraceResult& result, std::string& error, const CancelCheck& cancelled={});
+    // Metadata-only exact revision; never reads amplitudes or opens the source.
+    bool describeSeismicWindow(long long volumeId, SeismicWindowDescriptor& result, std::string& error,
+        const SeismicWindowReadOptions& options={}, SeismicWindowReadStats* stats=nullptr) const;
+    // Fixed-length SEG-Y rev1, big-endian IEEE32, declared ms TWT/OWT only.
+    // All source bytes, including headers, come from the trusted authenticated
+    // callback. No source path/PATH discovery, whole-volume array, schema write,
+    // quick-fingerprint fallback or partial output on failure is introduced.
+    bool readAuthenticatedSeismicWindow(const SeismicWindowQuery& query, const SeismicAuthenticatedSource& source,
+        SeismicWindow& result, std::string& error, const SeismicWindowReadOptions& options={},
+        SeismicWindowReadStats* stats=nullptr) const;
     // Exact SEG-Y IL/XL lookup. Never subtracts grid minima to guess a file ordinal,
     // never selects a nearest trace, and rejects missing traces or oversized windows.
     bool readSeismicTraceAtGrid(long long volumeId, int inlineNumber, int crosslineNumber,
