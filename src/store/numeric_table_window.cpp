@@ -22,7 +22,7 @@ bool sameCut(const NumericTableReadCut& a,const NumericTableReadCut& b) {
 }
 bool parse(const QByteArray& raw,const NumericTableColumn& column,double& number,unsigned char& boolean,bool& null) {
     QStringDecoder decoder(QStringDecoder::Utf8,QStringConverter::Flag::Stateless);
-    const auto text=decoder(raw);Q_UNUSED(text);if(decoder.hasError()||raw.contains('\0'))return false;
+    const QString text=decoder(raw);Q_UNUSED(text);if(decoder.hasError()||raw.contains('\0'))return false;
     const std::string bytes=raw.toStdString();null=std::find(column.nullTexts.begin(),column.nullTexts.end(),bytes)!=column.nullTexts.end();
     if(null)return true;
     std::string_view value(bytes);const auto blank=[](char c){return c==' '||c=='\t'||c=='\r'||c=='\n';};

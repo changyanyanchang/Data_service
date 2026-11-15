@@ -167,6 +167,56 @@ void encodedMetadataAndCasBudgets() {
     require(changed.revision!=descriptor.revision&&f.head().sequence==unchanged.sequence+1,
         "encoded declaration can be reduced through CAS without a source edit");
 }
+void strictUtf8DeclarationAndWindow() {
+    Fixture f;const auto before=f.head();
+    const std::vector<std::string> malformed{std::string(1,char(0xff)),std::string("\xe2\x82",2),
+        std::string("\xc0\xaf",2),std::string("\xed\xa0\x80",3)};
+    const auto rejected=[&](const NumericTableProjection& p,const std::string& previous,const char* expected) {
+        std::string revision="stale output";const auto head=f.head();
+        require(!f.service.confirmNumericTableProjection(p,head,previous,revision,f.error)&&
+            revision.empty()&&f.error==expected,"malformed UTF-8 declaration rejected before publication");
+        const auto after=f.head();require(after.storeId==head.storeId&&after.generation==head.generation&&
+            after.sequence==head.sequence,"invalid encoding does not advance or replace the model head");
+    };
+    for(const auto& bytes:malformed) {
+        auto p=f.definition();p.columns[0].label=bytes;rejected(p,{},"NumericTableInvalidColumn");
+        p=f.definition();p.columns[0].unit=bytes;rejected(p,{},"NumericTableInvalidColumn");
+        p=f.definition();p.columns[0].nullTexts={bytes};rejected(p,{},"NumericTableInvalidNullRule");
+        NumericTableDescriptor absent;
+        require(!f.reader.describeNumericTableProjection(f.tableId,absent,f.error)&&
+            absent.revision.empty()&&absent.projection.columns.empty()&&f.error=="NumericTableProjectionUnavailable",
+            "rejected initial declaration exposes no partial metadata");
+    }
+    detail::ProjectStore probe;require(probe.open(QString::fromStdString(f.service.projectPath()),false,{},f.error,true),f.error);
+    QSqlQuery rows;require(probe.exec("SELECT (SELECT count(*) FROM numeric_table_projections),(SELECT count(*) FROM numeric_table_columns)",{},f.error,&rows)&&
+        rows.next()&&rows.value(0).toLongLong()==0&&rows.value(1).toLongLong()==0,"rejected UTF-8 leaves no stored declaration or columns");
+    rows.finish();require(f.head().sequence==before.sequence,"all rejected declarations retain the initial head");
+    auto p=f.definition();p.columns[0].label=u(QString::fromUtf8("\xe6\x8c\xaf\xe5\xb9\x85\xf0\x9f\x98\x83"));
+    p.columns[0].unit=std::string("\xc2\xb5V",3);p.columns[0].nullTexts.push_back(std::string("\xe7\xbc\xba\xe6\xb5\x8b",6));
+    auto descriptor=f.confirm(p);require(descriptor.projection==p,"valid multibyte labels, units and null rules preserve exact UTF-8");
+    for(const auto& bytes:malformed) {
+        auto changed=p;changed.columns[0].label=bytes;rejected(changed,descriptor.revision,"NumericTableInvalidColumn");
+        changed=p;changed.columns[0].unit=bytes;rejected(changed,descriptor.revision,"NumericTableInvalidColumn");
+        changed=p;changed.columns[0].nullTexts.push_back(bytes);rejected(changed,descriptor.revision,"NumericTableInvalidNullRule");
+        NumericTableDescriptor retained;require(f.reader.describeNumericTableProjection(f.tableId,retained,f.error)&&
+            retained.revision==descriptor.revision&&retained.projection==p,"failed replacement retains all original metadata and revision");
+        auto query=f.query(descriptor);query.columnIds={bytes};NumericTableWindow result;NumericTableReadStats usage;
+        require(!f.reader.readNumericTableWindow(query,result,f.error,{},&usage)&&f.error=="NumericTableInvalidColumn"&&
+            result.columns.empty()&&result.descriptor.revision.empty()&&usage.metadataBytesRead==0&&usage.cellsRead==0,
+            "malformed UTF-8 window column IDs deliver no metadata or arrays");
+        f.edit("UPDATE source_cells SET text=CAST(? AS TEXT) WHERE table_id=? AND row_num=4 AND col_num=2",
+            {QByteArray(bytes.data(),qsizetype(bytes.size())),f.tableId});
+        descriptor=f.confirm(p,descriptor.revision);query=f.query(descriptor);
+        require(!f.reader.readNumericTableWindow(query,result,f.error,{},&usage)&&f.error=="NumericTableCellTypeInvalid"&&
+            result.columns.empty()&&result.sourceRows.empty()&&result.descriptor.revision.empty()&&
+            usage.cellsRead>4&&usage.cellTextBytesRead>0&&usage.outputBytes==0,
+            "malformed UTF-8 in a later selected column exposes no partial numeric data");
+    }
+    f.edit("UPDATE source_cells SET text='1' WHERE table_id=? AND row_num=4 AND col_num=2",{f.tableId});
+    descriptor=f.confirm(p,descriptor.revision);NumericTableWindow result;
+    require(f.reader.readNumericTableWindow(f.query(descriptor),result,f.error)&&result.descriptor.projection==p,
+        "correct UTF-8 declaration and numeric values remain readable after rejected encodings");
+}
 void schemaUpgradeCancellation() {
     QTemporaryDir root;DataService service;std::string error;require(service.createProject(u(root.path()+"/project"),"upgrade",error),error);
     int checks=0;require(!service.upgradeNumericTableProjectionSchema(error,[&]{return ++checks==4;})&&error=="NumericTableCancelled","schema upgrade cancellation");
@@ -193,6 +243,6 @@ void shapeRepairAndReusedIds() {
 }
 int main(int argc,char** argv) {
     QCoreApplication app(argc,argv);
-    try {valuesAndIdentity();revisionsRollbackAndReopen();snapshotAndCancellation();legacyAndInvalidDeclarations();budgetsAndStrictTypes();unselectedLargeCellsAndIndex();encodedMetadataAndCasBudgets();schemaUpgradeCancellation();shapeRepairAndReusedIds();std::cout<<"numeric_table_contract passed\n";return 0;}
+    try {valuesAndIdentity();revisionsRollbackAndReopen();snapshotAndCancellation();legacyAndInvalidDeclarations();budgetsAndStrictTypes();unselectedLargeCellsAndIndex();encodedMetadataAndCasBudgets();strictUtf8DeclarationAndWindow();schemaUpgradeCancellation();shapeRepairAndReusedIds();std::cout<<"numeric_table_contract passed\n";return 0;}
     catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

@@ -17,7 +17,7 @@ const QStringList triggerNames{"pds_numeric_cells_i","pds_numeric_cells_u","pds_
 bool utf8(const std::string& text,std::size_t maximum,bool empty=false) {
     if((!empty&&text.empty())||text.size()>maximum||text.find('\0')!=std::string::npos)return false;
     QStringDecoder decoder(QStringDecoder::Utf8,QStringConverter::Flag::Stateless);
-    const auto value=decoder(QByteArrayView(text.data(),qsizetype(text.size())));Q_UNUSED(value);return !decoder.hasError();
+    const QString value=decoder(QByteArrayView(text.data(),qsizetype(text.size())));Q_UNUSED(value);return !decoder.hasError();
 }
 bool hash(const std::string& text) {
     return text.size()==64&&std::all_of(text.begin(),text.end(),[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');});
