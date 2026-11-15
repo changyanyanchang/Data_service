@@ -1,7 +1,8 @@
 # numeric_table.v1 SDK 前置与验收
 
 日期：2026-11-15。基线：`9160615d`；实现 `b71a7106`，审阅修复及实际编译源码
-冻结于 `2c711ce1`。后续仅补验收记录。主仓 I1 接线与端到端验收仍待实施。
+初轮冻结于 `2c711ce1`，最终 UTF-8 修复及实际编译源码为 `8ecc6d2b`。
+其后仅补验收记录。主仓 I1 接线与端到端验收仍待实施。
 
 ## 范围
 
@@ -23,6 +24,12 @@ schema 只允许显式可写升级；普通读取和只读打开不隐式迁移�
 新增 `encodedMetadataAndCasBudgets` 覆盖首次原子拒绝、近界合法声明、低读取预算、
 无操作确认及缩小声明后的 CAS 更新。
 
+跨批审阅又发现 Qt `QStringDecoder` 返回惰性转换对象：用 `const auto` 保存但不物化时
+尚未解码，`hasError()` 不能证明 UTF-8 合法。两处改为显式 `const QString` 并保留
+Stateless 语义；新增 `strictUtf8DeclarationAndWindow` 覆盖非法前导、截断、overlong、
+surrogate 编码及 label/unit/null 参数，拒绝时无部分声明/无 head 变化。窗口的后列坏
+原始字节也不交付先前数值，正确中文、补充平面和 µ 保持原始 UTF-8。
+
 ## 实际验证
 
 Linux 独立物理 build，C++20，构建并行度 2；七个目标实际编译通过：
@@ -32,10 +39,11 @@ numeric_table_tests metadata_budget_tests model_change_tests readonly_service_te
 data_page_tests snapshot_tests object_descriptor_tests
 ```
 
-对应 CTest **7/7 通过，27.95 秒**：numeric_table_contract、metadata_budget_contract、
+最终源码增量编译及对应 CTest **7/7 通过，22.96 秒**：numeric_table_contract、metadata_budget_contract、
 model_change_contract、readonly_service_contract、data_page_contract、snapshot_contract、
 object_descriptor_contract。测试覆盖值/null/bool、精确身份、CAS/取消回滚/重开/只读、
 源改动失效、并发快照、字段/累计/输出预算、超大单元格和未选列、索引计划及 schema 修复。
+此前 `2c711ce1` 的 7/7、27.95 秒保留为 UTF-8 修复前记录，不替代最终验收。
 
 本仓没有独立 CI 源码门禁脚本；本批按 AGENTS 执行五项边界/格式检查，**5/5 通过**：
 15 个公开头无 Qt include，8 个 parser 源/头无 SQL/store/UI include，84 个服务实现源/头
