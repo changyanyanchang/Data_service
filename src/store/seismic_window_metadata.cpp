@@ -46,6 +46,12 @@ bool declared(const std::string& value, std::size_t limit) {
     const auto text = q(value).trimmed().toCaseFolded();
     return !text.isEmpty() && !QStringList{"unknown", "unspecified", "undefined", "?", "n/a"}.contains(text);
 }
+bool sourceFingerprint(const std::string& value) {
+    const auto offset = value.rfind("quick:", 0) == 0 ? std::size_t(6) : std::size_t(0);
+    return value.size() == offset + 64 && std::all_of(value.begin() + offset, value.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+}
 }
 bool seismicWindowDescriptor(const ProjectStore& store, std::int64_t volumeId, SeismicWindowDescriptor& result,
     const SeismicWindowReadOptions& options, SeismicWindowReadStats& stats, std::string& error) {
@@ -62,7 +68,7 @@ bool seismicWindowDescriptor(const ProjectStore& store, std::int64_t volumeId, S
     SeismicWindowDescriptor pending;
     pending.cut.model = {texts[0].toStdString(), texts[1].toStdString(), row.value(0).toLongLong(), true};
     if (row.value(1).toBool() || pending.cut.model.sequence < 0 || texts[0].isEmpty() || texts[0].size() > 64 ||
-        texts[1].isEmpty() || texts[1].size() > 64) { error = "SeismicWindowReadCutUnavailable"; return false; }
+        texts[1].isEmpty() || texts[1].size() > 64 || texts[0].contains('\0') || texts[1].contains('\0')) { error = "SeismicWindowReadCutUnavailable"; return false; }
     row.finish();
     if (seismicWindowStopped(options, error)) return false;
     if (!readTexts(store, "volumes v JOIN sources s ON s.id=v.source_id WHERE v.id=? AND typeof(v.source_id)='integer' AND typeof(s.active)='integer'", {"v.amplitude_unit", "v.sampling", "s.hash"},
@@ -70,6 +76,7 @@ bool seismicWindowDescriptor(const ProjectStore& store, std::int64_t volumeId, S
     pending.cut.volumeId = volumeId; pending.cut.sourceId = row.value(0).toLongLong();
     if (!row.value(1).toBool() || pending.cut.sourceId < 1) { error = "SeismicWindowSourceUnavailable"; return false; }
     pending.amplitudeUnit = texts[0].toStdString(); pending.registeredSourceFingerprint = texts[2].toStdString();
+    if (!sourceFingerprint(pending.registeredSourceFingerprint)) { error = "SeismicWindowSourceUnavailable"; return false; }
     QJsonParseError parse; const auto document = QJsonDocument::fromJson(texts[1], &parse);
     if (parse.error != QJsonParseError::NoError || !document.isObject()) { error = "SeismicWindowAxisUndeclared"; return false; }
     const auto sampling = document.object(); const auto count = sampling.value("sampleCount");

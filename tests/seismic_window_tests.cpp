@@ -105,6 +105,8 @@ void staticBudgetsAndFailureHaveNoPartialValues() {
         out.amplitudes.empty() && out.sourceSha256.empty(), "failed amplitude authentication returns no earlier header/partial array");
     bad = source; bad.read = [](auto, auto, auto& bytes, auto&, const auto&) { bytes = {1}; return true; };
     require(!f.reader.readAuthenticatedSeismicWindow(original, bad, out, f.error) && out.axis.empty(), "short provider result rejected");
+    bad = source; bad.read = [](auto, auto, auto&, auto&, const auto&) -> bool { throw std::runtime_error("host I/O failure"); };
+    require(!f.reader.readAuthenticatedSeismicWindow(original, bad, out, f.error) && out.axis.empty(), "host callback exception cannot expose partial results");
 }
 void unsupportedLayoutsAndNullsAreExplicit() {
     for (const auto& edit : std::vector<std::function<void(QByteArray&)>>{
@@ -132,6 +134,14 @@ void revisionMetadataAndCancellationBoundaries() {
     SeismicWindowDescriptor descriptor; SeismicWindowReadStats stats;
     require(!f.reader.describeSeismicWindow(f.volumeId, descriptor, f.error, {}, &stats) && descriptor.cut.volumeId == 0 &&
         stats.metadataBytesRead < 1024 && f.error == "SeismicWindowMetadataBudgetExceeded", "SQL guards oversized metadata before materialization");
+    Fixture legacy; legacy.edit("UPDATE sources SET hash=? WHERE id=?", {QString("quick:") + QString(64, 'a'), legacy.sourceId});
+    auto pinned = legacy.query();
+    require(legacy.reader.readAuthenticatedSeismicWindow(pinned, legacy.source(), out, legacy.error) &&
+        out.sourceSha256 == legacy.sha && out.descriptor.registeredSourceFingerprint.starts_with("quick:"),
+        "legacy fingerprint remains metadata; host supplies independent complete authenticated source SHA");
+    pinned.sourceSha256 = "quick:" + std::string(64, 'a');
+    require(!legacy.reader.readAuthenticatedSeismicWindow(pinned, legacy.source(), out, legacy.error) && out.axis.empty(),
+        "quick fingerprint can never substitute the complete callback anchor");
 }
 }
 int main(int argc, char** argv) {

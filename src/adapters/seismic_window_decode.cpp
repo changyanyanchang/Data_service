@@ -3,6 +3,7 @@
 #include <QtEndian>
 #include <cmath>
 #include <cstring>
+#include <exception>
 
 namespace paleo::data::detail {
 namespace {
@@ -15,7 +16,9 @@ bool read(const SeismicAuthenticatedSource& source, std::int64_t offset, int cou
     }
     std::vector<std::uint8_t> output; std::string detail;
     ++stats.sourceReadCalls; stats.requestedSourceBytes += count;
-    const bool ok = source.read(offset, count, output, detail, options.cancelled);
+    bool ok = false;
+    try { ok = source.read(offset, count, output, detail, options.cancelled); }
+    catch (const std::exception&) { error = "SeismicWindowAuthenticatedReadFailed"; return false; }
     if (seismicWindowStopped(options, error)) return false;
     if (!ok || output.size() != std::size_t(count)) { error = "SeismicWindowAuthenticatedReadFailed"; return false; }
     bytes = QByteArray(reinterpret_cast<const char*>(output.data()), count); return true;
