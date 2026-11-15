@@ -1,5 +1,9 @@
 # Explicit bounded numeric table projections
 
+Implementation review and executed validation are recorded in
+[the SDK acceptance note](progress/numeric-table-20261115.md); application integration
+remains a separate change.
+
 `numeric_table.v1` adds a numeric view over an existing `source_tables` ID. It does
 not replace `DataTable`, infer types from display strings, or modify `source_cells`.
 There is no new general table/catalog service and no new geological relation kind.
