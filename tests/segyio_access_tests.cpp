@@ -202,15 +202,22 @@ int main(int argc, char** argv) {
         const QString standardPath = temp.path() + "/中文 标准地震.sgy";
         fixture(standardPath);
         const auto standard = importVolume(service, standardPath, error);
+        const auto original = parseFile(utf8(standardPath));
+        require(original.volumes.size() == 1 && original.volumes[0].geometry.coordinateSystem.empty() &&
+            original.volumes[0].sampling.timeType.empty(), "source parser must preserve undeclared CRS and TWT");
         SeismicVolume volume;
         require(service.readVolume(standard, volume, error), error);
-        require(volume.traces.empty() && volume.geometry.coordinateSystem.empty() && volume.sampling.timeType.empty(), "metadata stays external and unknown conventions stay unknown");
+        require(volume.traces.empty() && volume.sampling.timeType.empty(), "amplitudes stay external and undeclared TWT stays unknown");
+        ProjectCrsInfo project; require(service.readProjectCrsInfo(project, error), error);
+        require(project.selectionBasis == "default" && project.coordinateSystem == "EPSG:32650" && project.coordinateUnit == "m" &&
+            volume.geometry.coordinateSystem == project.coordinateSystem && volume.geometry.coordinateUnit == project.coordinateUnit,
+            "effective volume coordinates inherit the explicit project default without rewriting the source declaration");
         SeismicFileInfo info;
         require(service.inspectSeismic(standard, info, error), error);
         require(info.traceCount == 12 && info.sampleCount == 8 && info.sampleFormat == 5 && info.byteOrder == "big-endian", "binary metadata decoded");
         require(info.inlineMin == 100 && info.inlineMax == 104 && info.inlineStep == 2 && info.crosslineCount == 4, "native step2 geometry");
         require(info.geometryStatus == "sampled-regular" && info.engine.find("segyio") != std::string::npos, "actual engine and sampled verification status");
-        done("metadata without CRS/TWT, UTF-8 paths, external data");
+        done("undeclared source CRS/TWT, effective project coordinates, UTF-8 paths and external data");
 
         SeismicTraceResult trace;
         SeismicTraceReadOptions traceOptions; traceOptions.firstSample = 1; traceOptions.sampleCount = 3;
