@@ -40,6 +40,8 @@ foreach($file in @('CMakeLists.txt','README.md','AGENTS.md','build.ps1','build-e
 }
 New-Item -ItemType Directory -Path (Join-Path $sourceDirectory 'docs') | Out-Null
 Get-ChildItem -LiteralPath (Join-Path $packageRoot 'docs') -File | ForEach-Object {Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $sourceDirectory 'docs')}
+$freexl=Join-Path $appDirectory 'paleo_freexl.dll'
+if(-not (Test-Path -LiteralPath $freexl)){ $freexl=Join-Path $appDirectory 'freexl.dll' }
 $manifest=[ordered]@{
     name=$PackageName;version='0.1.0';architecture='Windows x64';packagedAt=(Get-Date).ToString('o')
     seismicEngine='equinor/segyio v2.0.0-alpha.1 with documented local patches'
@@ -49,7 +51,7 @@ $manifest=[ordered]@{
     realData='Not included'
     sourceModelSha256=(Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'include/paleo_data/model.h') -Algorithm SHA256).Hash
     executableSha256=(Get-FileHash -LiteralPath (Join-Path $appDirectory 'paleo_data_demo.exe') -Algorithm SHA256).Hash
-    freexlSha256=(Get-FileHash -LiteralPath (Join-Path $appDirectory 'freexl.dll') -Algorithm SHA256).Hash
+    freexlSha256=(Get-FileHash -LiteralPath $freexl -Algorithm SHA256).Hash
 }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $packageRoot 'package-info.json') -Encoding utf8
 Write-Output "Portable folder prepared: $packageRoot"

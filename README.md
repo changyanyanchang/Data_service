@@ -39,7 +39,9 @@ ctest --test-dir build --output-on-failure
 cmake --install build --prefix sdk
 ```
 
-受控前缀使用包含 Qt、Zlib、Zstd 的 OSGeo4W 根目录或 Linux 解包前缀的 `usr` 目录。
+受控前缀使用 OSGeo4W 根目录或 Linux 解包前缀的 usr 目录，须提供 Qt、Zlib、Zstd 和
+XLS 依赖（Windows 的 libiconv、Linux 的 FreeXL）。受控构建把 XLS 动态库放到安装树的
+bin 目录。使用已安装 SDK 的宿主将该库放在自身可执行文件旁，同时携带同一前缀的运行依赖。
 配置会核对 Qt 工具、头文件和库均来自该前缀。安装后的 SDK 可在使用同一前缀的工程中
 通过 `find_package(PaleoDataService CONFIG REQUIRED)` 接入。
 

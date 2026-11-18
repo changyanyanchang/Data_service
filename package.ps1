@@ -47,7 +47,8 @@ $deployMode=if($Configuration -eq 'Debug'){'--debug'}else{'--release'}
 if($LASTEXITCODE -ne 0){throw 'Qt runtime deployment failed'}
 $offscreen=Join-Path $QtRoot 'plugins/platforms/qoffscreen.dll'
 if(Test-Path -LiteralPath $offscreen){Copy-Item -LiteralPath $offscreen -Destination (Join-Path $OutputDirectory 'platforms/qoffscreen.dll') -Force}
-$freexl=Join-Path $binaryDirectory 'freexl.dll'
+$freexl=Join-Path $binaryDirectory 'paleo_freexl.dll'
+if(-not (Test-Path -LiteralPath $freexl)){ $freexl=Join-Path $binaryDirectory 'freexl.dll' }
 if(-not (Test-Path -LiteralPath $freexl)){throw 'Build the maintained FreeXL runtime first (build.ps1 includes it by default on Windows).'}
 Copy-Item -LiteralPath $freexl -Destination $OutputDirectory
 # Qt's Windows ICU build imports the OS's unsuffixed ICU API. A standalone ICU
