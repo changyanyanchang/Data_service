@@ -49,7 +49,12 @@ int main(int argc,char** argv){QApplication app(argc,argv);try{
     const QString project=temporary.path()+"/project";DataService service;std::string error;check(service.createProject(utf8(project),"UI SEG-Y test",error),error);
     ImportOptions options;options.copySources=false;ImportReport report;check(service.importFile(utf8(path),options,report,error),error);
     std::vector<DataEntry> entries;check(service.listData("volumes",0,entries,error)&&entries.size()==1,error);const auto id=entries[0].id;
-    SeismicVolume volume;check(service.readVolume(id,volume,error),error);check(volume.geometry.coordinateSystem.empty()&&volume.sampling.timeType.empty(),"fixture unexpectedly has confirmed conventions");
+    ProjectCoordinates projectCoordinates;check(service.readProjectCoordinates(projectCoordinates,error),error);
+    SeismicVolume volume;check(service.readVolume(id,volume,error),error);
+    check(volume.geometry.coordinateSystem==projectCoordinates.coordinateSystem&&
+          volume.geometry.coordinateUnit==projectCoordinates.coordinateUnit&&
+          volume.sampling.timeType.empty()&&volume.sampling.timeReference.empty(),
+          "volume must inherit the project CRS without guessing its time conventions");
     ApiDemoWidget widget;widget.setProjectPath(project);auto* first=control<QLineEdit>(widget,"apiFirstValue");auto* last=control<QLineEdit>(widget,"apiLastValue");
 
     widget.setExample("seismic_info");check(widget.selectResource(id),"select volume for inspect");check(first->isHidden()&&last->isHidden(),"inspection should have no numeric controls");first->setText("invalid hidden parameter");last->setText("1e100");check(run(widget),"inspect UI failed");auto out=json(widget);check(out["returnType"].toString()=="SeismicFileInfo"&&out["traceCount"].toInteger()==12&&out["sampleCount"].toInt()==128,"inspection metadata mismatch");check(out["sampleInterval"].toDouble()==2&&out["firstTime"].toDouble()==100,"inspection time axis mismatch");check(widget.generatedCode().contains("service.inspectSeismic"),"inspection code missing");

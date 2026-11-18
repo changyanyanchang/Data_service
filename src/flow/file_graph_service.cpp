@@ -75,11 +75,18 @@ bool DataService::relateSources(long long sourceId,long long targetSourceId,cons
 
 bool DataService::removeSourceRelation(long long relationId,std::string& error){
     error.clear();
-    if(impl_->store.readOnly){error="只读工区不能修改文件关系";return false;}
+    auto& store=impl_->store;
+    if(store.readOnly){error="只读工区不能修改文件关系";return false;}
     if(relationId<=0){error="文件关系编号无效";return false;}
+    Transaction tx(store,error);
+    if(!tx.active)return false;
+    if(!store.exec("DELETE FROM source_relations WHERE id=?",{relationId},error))return false;
+    // Read SQLite's change count before the model journal writes during commit.
     QSqlQuery rows;
-    if(!impl_->store.exec("DELETE FROM source_relations WHERE id=?",{relationId},error,&rows))return false;
-    if(rows.numRowsAffected()!=1){error="文件关系不存在";return false;}return true;
+    if(!store.exec("SELECT changes()",{},error,&rows))return false;
+    if(!rows.next()||rows.value(0).toLongLong()!=1){error="文件关系不存在";return false;}
+    rows.finish();
+    return tx.commit(error);
 }
 
 bool DataService::listSourceRelations(std::vector<SourceRelation>& result,std::string& error)const{
