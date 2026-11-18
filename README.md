@@ -33,11 +33,15 @@
 需要 C++20 编译器、CMake 3.24 或更高版本、Qt6 Core/Gui/Sql/Widgets、Zlib，以及 Qt SQLite 驱动；构建测试还需 Qt6 Test。可选 Zstd 用于 SF3P 压缩页读取，未提供时只支持未压缩页。Windows 使用与 Qt 匹配的 MSVC x64 工具链。以下为单配置 Ninja 示例，路径应替换为自己的安装位置：
 
 ```powershell
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="C:/Qt/6.x/msvc2022_64" -DZLIB_ROOT="C:/deps/zlib"
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPALEO_DEPENDENCY_PREFIX="C:/deps/osgeo4w-native"
 cmake --build build --parallel 8
 ctest --test-dir build --output-on-failure
 cmake --install build --prefix sdk
 ```
+
+受控前缀使用包含 Qt、Zlib、Zstd 的 OSGeo4W 根目录或 Linux 解包前缀的 `usr` 目录。
+配置会核对 Qt 工具、头文件和库均来自该前缀。安装后的 SDK 可在使用同一前缀的工程中
+通过 `find_package(PaleoDataService CONFIG REQUIRED)` 接入。
 
 运行时应能找到 Qt DLL、`platforms` 和 `sqldrivers` 插件。无窗口测试可设置 `QT_QPA_PLATFORM=offscreen`。多配置构建器需要在构建、安装和测试命令中选定 `Release`，程序通常位于 `build/Release`。
 
