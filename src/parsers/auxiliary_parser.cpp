@@ -102,7 +102,17 @@ struct FreeXlLoader {
     QString loadedConfigured;
     FreeXlApi api;
     bool ensureLoaded(FreeXlApi& out, QString& error) {
+#ifdef PDS_PACKAGED_FREEXL
+        const auto appDirectory=QCoreApplication::applicationDirPath();
+        if(appDirectory.isEmpty()) {error="缺少应用路径，无法定位 FreeXL";return false;}
+#ifdef Q_OS_WIN
+        const auto configured=QDir(appDirectory).filePath("paleo_freexl.dll");
+#else
+        const auto configured=QDir(appDirectory).filePath("libpaleo_freexl.so");
+#endif
+#else
         const auto configured=qEnvironmentVariable("PALEO_FREEXL_LIBRARY");
+#endif
         if(library.isLoaded()&&api.openXls&&api.close&&api.count&&api.name&&api.select&&api.dimensions&&api.cell&&loadedConfigured==configured) {
             out=api;
             return true;
@@ -112,8 +122,10 @@ struct FreeXlLoader {
         loadedConfigured=configured;
         QStringList candidates;
         if(!configured.isEmpty()) candidates << configured;
+#ifndef PDS_PACKAGED_FREEXL
         candidates << QDir(QCoreApplication::applicationDirPath()).filePath("paleo_freexl")
                    << QDir(QCoreApplication::applicationDirPath()).filePath("freexl") << "freexl";
+#endif
         for(const auto& candidate:candidates) {
             library.setFileName(candidate);
             if(library.load()) break;
