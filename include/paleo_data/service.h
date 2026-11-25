@@ -11,6 +11,7 @@
 #include "model_changes.h"
 #include "curve_window.h"
 #include "metadata_read.h"
+#include "wellbore_identity.h"
 #include "numeric_table.h"
 #include "seismic_window.h"
 #include <memory>
@@ -304,6 +305,15 @@ public:
     bool readWellInfo(long long wellId, WellInfo& result, std::string& error, bool inheritProjectCoordinates=true) const;
     // Basic fields only: one query, no per-well counts or payload decoding.
     bool listWellInfos(std::vector<WellInfoRecord>& result, std::string& error) const;
+    // Registers a stable caller-supplied bore key and its optional confirmed
+    // bindings atomically. Repeating the same declaration is a no-op; a
+    // conflicting binding/name fails without changing either side.
+    bool registerWellbore(const WellboreDeclaration& declaration, std::string& error);
+    bool listWellbores(long long wellId, const std::string& afterKey, int limit,
+                       WellborePage& result, std::string& error) const;
+    // A successful lookup without a binding returns an empty optional.
+    bool findWellbore(const ExternalWellboreKey& key, std::optional<WellboreRef>& result, std::string& error) const;
+    bool findWellbore(const SourceWellboreKey& key, std::optional<WellboreRef>& result, std::string& error) const;
     // Indexed metadata only. Missing rows are not I/O errors. id>0 selects id;
     // otherwise name is exact (the same fallback used by catalog projections).
     // Only id/name/TD are read; a name beyond 4096 UTF-8 bytes rejects, never clips.
