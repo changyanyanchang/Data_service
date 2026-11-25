@@ -30,6 +30,11 @@ struct WellboreDeclaration {
     std::optional<ExternalWellboreKey> external;
     std::optional<SourceWellboreKey> source;
 };
+// Confirm an indexed source in a specific model generation. The fingerprint
+// is the persisted source revision, including its prefix for a quick digest.
+bool confirmSourceWellbore(const std::string& directory, const std::string& storeId,
+                           const std::string& generation, const std::string& sourceFingerprint,
+                           const WellboreDeclaration& declaration, std::string& error);
 struct WellborePage {
     std::vector<WellboreIdentity> items;
     // Empty at the last page; otherwise pass unchanged to the next request.

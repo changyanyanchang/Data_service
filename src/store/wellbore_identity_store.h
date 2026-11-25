@@ -3,7 +3,7 @@
 
 namespace paleo::data::detail {
 class ProjectStore;
-bool registerBore(ProjectStore&, const WellboreDeclaration&, std::string&);
+bool registerBore(ProjectStore&, const WellboreDeclaration&, std::string&, const std::string* expectedFingerprint = nullptr);
 bool listBores(const ProjectStore&, long long, const std::string&, int, WellborePage&, std::string&);
 bool findBore(const ProjectStore&, const ExternalWellboreKey&, std::optional<WellboreRef>&, std::string&);
 bool findBore(const ProjectStore&, const SourceWellboreKey&, std::optional<WellboreRef>&, std::string&);

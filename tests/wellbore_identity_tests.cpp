@@ -54,7 +54,13 @@ static void runContract() {
         check(writer.openProject(project, error), error);
         ModelChangeHead before, after, repeat;
         check(writer.readModelChangeHead(before, error), error);
-        check(writer.registerWellbore(branch, error), error);
+        SourceIndexEntry source;
+        check(writer.readSourceIndexEntry(sourceId, source, error), error);
+        check(!confirmSourceWellbore(project, before.storeId, "another-generation", source.sha256, branch, error) &&
+              error == "StaleModelGeneration", "stale generation must not receive the binding");
+        check(!confirmSourceWellbore(project, before.storeId, before.generation, "changed", branch, error) &&
+              error == "SourceRevisionChanged", "stale source must not receive the binding");
+        check(confirmSourceWellbore(project, before.storeId, before.generation, source.sha256, branch, error), error);
         check(writer.readModelChangeHead(after, error) && after.sequence > before.sequence, "identity change published");
         check(writer.registerWellbore(branch, error) && writer.readModelChangeHead(repeat, error) &&
               repeat.sequence == after.sequence, "repeat does not create a new model change");

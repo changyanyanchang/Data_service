@@ -92,7 +92,8 @@ bool readBinding(const ProjectStore& store, const Key& key, std::optional<Wellbo
 }
 }
 
-bool registerBore(ProjectStore& store, const WellboreDeclaration& declaration, std::string& error) {
+bool registerBore(ProjectStore& store, const WellboreDeclaration& declaration, std::string& error,
+                  const std::string* expectedFingerprint) {
     error.clear();
     if (store.readOnly) return fail(error, "Read-only model");
     const auto& bore = declaration.wellbore;
@@ -103,8 +104,10 @@ bool registerBore(ProjectStore& store, const WellboreDeclaration& declaration, s
     if (!transaction.active || !requireWell(store, bore.ref.wellId, error)) return false;
     if (declaration.source) {
         QSqlQuery row;
-        if (!store.exec("SELECT 1 FROM sources WHERE id=? AND active<>0", {declaration.source->sourceId}, error, &row)) return false;
+        if (!store.exec("SELECT hash FROM sources WHERE id=? AND active<>0", {declaration.source->sourceId}, error, &row)) return false;
         if (!row.next()) return fail(error, "Unknown or inactive source");
+        if (expectedFingerprint && s(row.value(0).toString()) != *expectedFingerprint)
+            return fail(error, "SourceRevisionChanged");
     }
     bool present = false;
     if (!schemaPresent(store, present, error) || (!present && !createSchema(store, error))) return false;
