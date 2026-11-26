@@ -1,5 +1,4 @@
 #include "store/project_store.h"
-#include "store/model_change_journal.h"
 #include "store/wellbore_identity_store.h"
 
 namespace paleo::data {
@@ -14,16 +13,12 @@ bool confirmSourceWellbore(const std::string& directory, const std::string& stor
     if (!lease) return false;
     detail::ProjectStore store;
     if (!store.open(detail::q(directory), false, {}, error, true)) return false;
-    ModelChangeHead head;
-    if (!detail::readJournalHead(store, head, error)) return false;
-    if (!head.available || head.storeId != storeId || head.generation != generation) {
-        error = "StaleModelGeneration";
-        return false;
-    }
+    const detail::SourceWellboreConfirmation expected{storeId, generation, sourceFingerprint};
+    if (!expected.matchesModel(store, error)) return false;
     // Keep the directory lease across reopening and the transaction. This
     // metadata command needs no well-wide coordinate scan or payload parsing.
     if (!store.open(detail::q(directory), false, {}, error)) return false;
-    return detail::registerBore(store, declaration, error, &sourceFingerprint);
+    return detail::registerBore(store, declaration, error, &expected);
 }
 bool DataService::registerWellbore(const WellboreDeclaration& declaration, std::string& error) {
     return detail::registerBore(impl_->store, declaration, error);

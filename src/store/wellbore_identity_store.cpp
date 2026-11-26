@@ -1,4 +1,5 @@
 #include "wellbore_identity_store.h"
+#include "model_change_journal.h"
 #include "project_store.h"
 
 namespace paleo::data::detail {
@@ -92,8 +93,15 @@ bool readBinding(const ProjectStore& store, const Key& key, std::optional<Wellbo
 }
 }
 
+bool SourceWellboreConfirmation::matchesModel(const ProjectStore& store, std::string& error) const {
+    ModelChangeHead head;
+    if (!readJournalHead(store, head, error)) return false;
+    return (head.available && head.storeId == storeId && head.generation == generation) ||
+        fail(error, "StaleModelGeneration");
+}
+
 bool registerBore(ProjectStore& store, const WellboreDeclaration& declaration, std::string& error,
-                  const std::string* expectedFingerprint) {
+                  const SourceWellboreConfirmation* expected) {
     error.clear();
     if (store.readOnly) return fail(error, "Read-only model");
     const auto& bore = declaration.wellbore;
@@ -101,12 +109,16 @@ bool registerBore(ProjectStore& store, const WellboreDeclaration& declaration, s
         (declaration.external && !valid(*declaration.external)) || (declaration.source && !valid(*declaration.source)))
         return fail(error, "Invalid wellbore declaration");
     Transaction transaction(store, error);
-    if (!transaction.active || !requireWell(store, bore.ref.wellId, error)) return false;
+    if (!transaction.active) return false;
+    // Writable open may rebuild the generation after an unmanaged writer commits.
+    // Recheck the caller's model under the same SQLite write lock as the binding.
+    if (expected && !expected->matchesModel(store, error)) return false;
+    if (!requireWell(store, bore.ref.wellId, error)) return false;
     if (declaration.source) {
         QSqlQuery row;
         if (!store.exec("SELECT hash FROM sources WHERE id=? AND active<>0", {declaration.source->sourceId}, error, &row)) return false;
         if (!row.next()) return fail(error, "Unknown or inactive source");
-        if (expectedFingerprint && s(row.value(0).toString()) != *expectedFingerprint)
+        if (expected && s(row.value(0).toString()) != expected->fingerprint)
             return fail(error, "SourceRevisionChanged");
     }
     bool present = false;

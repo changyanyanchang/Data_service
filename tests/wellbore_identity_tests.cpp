@@ -5,14 +5,61 @@
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QTemporaryDir>
+#include <chrono>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 
 using namespace paleo::data;
 static void check(bool ok, const std::string& why) {
     if (!ok) throw std::runtime_error(why);
 }
 static std::string utf8(const QString& value) { return value.toUtf8().toStdString(); }
+
+static void confirmWhileLegacyWriterCommits(const std::string& project, long long wellId, long long sourceId) {
+    DataService reader;
+    std::string error;
+    check(reader.openProjectReadOnly(project, error), error);
+    ModelChangeHead before, after;
+    SourceIndexEntry source;
+    check(reader.readModelChangeHead(before, error) && reader.readSourceIndexEntry(sourceId, source, error), error);
+    WellboreDeclaration branch{{{wellId, "legacy-race"}, "Legacy race"}, {},
+                               SourceWellboreKey{sourceId, "legacy-member"}};
+
+    // ProjectStore numbers successive Qt connections. Once the writable connection
+    // appears, the read-only check has completed. SQLite still holds our legacy write.
+    const auto connections = QSqlDatabase::connectionNames().filter("paleo_data_");
+    check(connections.size() == 1, "single review reader before concurrent confirmation");
+    const auto readerNumber = connections.front().section('_', -1).toLongLong();
+    const auto writableConnection = QStringLiteral("paleo_data_%1").arg(readerNumber + 2);
+    bool accepted = false;
+    std::string decision;
+    {
+        auto db = QSqlDatabase::addDatabase("QSQLITE", "legacy-wellbore-writer");
+        db.setDatabaseName(QString::fromStdString(project) + "/data.sqlite");
+        check(db.open(), "open legacy database connection");
+        QSqlQuery query(db);
+        check(query.exec("BEGIN IMMEDIATE") &&
+              query.exec("UPDATE wells SET remark='changed by legacy client'"), "start legacy change");
+        std::jthread confirmation([&] {
+            accepted = confirmSourceWellbore(project, before.storeId, before.generation, source.sha256, branch, decision);
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        while (!QSqlDatabase::contains(writableConnection) && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const bool reachedWritableOpen = QSqlDatabase::contains(writableConnection);
+        check(query.exec("COMMIT"), "commit legacy change");
+        confirmation.join();
+        check(reachedWritableOpen, "confirmation reached writable open after read-only preflight");
+    }
+    QSqlDatabase::removeDatabase("legacy-wellbore-writer");
+    check(!accepted && decision == "StaleModelGeneration", "old generation confirmation rejected after rebuild");
+    check(reader.readModelChangeHead(after, error) && before.generation != after.generation, "legacy edit rebuilt the generation");
+    std::optional<WellboreRef> found;
+    check(reader.findWellbore(*branch.source, found, error) && !found, "stale confirmation left no binding");
+    check(confirmSourceWellbore(project, after.storeId, after.generation, source.sha256, branch, error), error);
+    check(reader.findWellbore(*branch.source, found, error) && found == branch.wellbore.ref, "fresh confirmation persisted");
+}
 
 static void runContract() {
     QTemporaryDir dir;
@@ -97,6 +144,7 @@ static void runContract() {
         WellInfo old;
         check(reader.readWellInfo(wellId, old, error) && old.wellName == "A-1", "legacy well API");
     }
+    confirmWhileLegacyWriterCommits(project, wellId, sourceId);
     {
         auto db = QSqlDatabase::addDatabase("QSQLITE", "future-wellbore");
         db.setDatabaseName(dir.filePath("工区/data.sqlite"));
