@@ -32,6 +32,9 @@ struct WellboreDeclaration {
 };
 // Confirm an indexed source in a specific model generation. The fingerprint
 // is the persisted source revision, including its prefix for a quick digest.
+// A LAS "file" member requires exactly one stored parent well matching the
+// declaration (SourceWellMismatch otherwise). Explicit confirmation can repair
+// a legacy binding to a different parent, retaining other identities.
 bool confirmSourceWellbore(const std::string& directory, const std::string& storeId,
                            const std::string& generation, const std::string& sourceFingerprint,
                            const WellboreDeclaration& declaration, std::string& error);

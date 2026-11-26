@@ -1,8 +1,10 @@
 #pragma once
 #include "paleo_data/wellbore_identity.h"
+#include <QSqlQuery>
 
 namespace paleo::data::detail {
 class ProjectStore;
+bool querySourceWellIds(const ProjectStore&, long long sourceId, QSqlQuery& rows, std::string& error);
 struct SourceWellboreConfirmation {
     const std::string& storeId;
     const std::string& generation;

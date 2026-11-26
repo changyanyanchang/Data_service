@@ -1,6 +1,8 @@
 #include "wellbore_identity_store.h"
 #include "model_change_journal.h"
 #include "project_store.h"
+#include <QFileInfo>
+#include <QSqlError>
 
 namespace paleo::data::detail {
 namespace {
@@ -65,10 +67,17 @@ bool lookup(const ProjectStore& store, const BindingQuery& query, std::optional<
     if (row.next()) result = WellboreRef{row.value(0).toLongLong(), s(row.value(1).toString())};
     return true;
 }
-bool bind(ProjectStore& store, BindingQuery query, const WellboreRef& target, std::string& error) {
+bool bind(ProjectStore& store, BindingQuery query, const WellboreRef& target, std::string& error,
+          const SourceWellboreKey* verifiedLas = nullptr) {
     std::optional<WellboreRef> previous;
     if (!lookup(store, query, previous, error)) return false;
-    if (previous) return *previous == target || fail(error, "WellboreConflict: identity already bound to another bore");
+    if (previous) {
+        if (*previous == target) return true;
+        if (verifiedLas && previous->wellId != target.wellId)
+            return store.exec("UPDATE wellbore_source_bindings SET well_id=?,bore_key=? WHERE source_id=? AND member_key=?",
+                              {target.wellId, q(target.key), verifiedLas->sourceId, q(verifiedLas->member)}, error);
+        return fail(error, "WellboreConflict: identity already bound to another bore");
+    }
     query.values << target.wellId << q(target.key);
     return store.exec(query.insert, query.values, error);
 }
@@ -93,6 +102,12 @@ bool readBinding(const ProjectStore& store, const Key& key, std::optional<Wellbo
 }
 }
 
+bool querySourceWellIds(const ProjectStore& store, long long sourceId, QSqlQuery& rows, std::string& error) {
+    return store.exec("SELECT well_id FROM log_sets WHERE source_id=? UNION SELECT well_id FROM tracks WHERE source_id=? "
+                      "UNION SELECT well_id FROM sample_tables WHERE source_id=? UNION SELECT well_id FROM well_objects WHERE source_id=? "
+                      "ORDER BY well_id", {sourceId, sourceId, sourceId, sourceId}, error, &rows);
+}
+
 bool SourceWellboreConfirmation::matchesModel(const ProjectStore& store, std::string& error) const {
     ModelChangeHead head;
     if (!readJournalHead(store, head, error)) return false;
@@ -114,18 +129,28 @@ bool registerBore(ProjectStore& store, const WellboreDeclaration& declaration, s
     // Recheck the caller's model under the same SQLite write lock as the binding.
     if (expected && !expected->matchesModel(store, error)) return false;
     if (!requireWell(store, bore.ref.wellId, error)) return false;
+    const SourceWellboreKey* verifiedLas = nullptr;
     if (declaration.source) {
         QSqlQuery row;
-        if (!store.exec("SELECT hash FROM sources WHERE id=? AND active<>0", {declaration.source->sourceId}, error, &row)) return false;
+        if (!store.exec("SELECT hash,original_path FROM sources WHERE id=? AND active<>0", {declaration.source->sourceId}, error, &row)) return false;
         if (!row.next()) return fail(error, "Unknown or inactive source");
         if (expected && s(row.value(0).toString()) != expected->fingerprint)
             return fail(error, "SourceRevisionChanged");
+        if (declaration.source->member == "file" &&
+            QFileInfo(row.value(1).toString()).suffix().compare("las", Qt::CaseInsensitive) == 0) {
+            QSqlQuery owners;
+            if (!querySourceWellIds(store, declaration.source->sourceId, owners, error)) return false;
+            if (!owners.next() || owners.value(0).toLongLong() != bore.ref.wellId || owners.next())
+                return fail(error, "SourceWellMismatch");
+            if (owners.lastError().isValid()) { error = s(owners.lastError().text()); return false; }
+            if (expected) verifiedLas = &*declaration.source;
+        }
     }
     bool present = false;
     if (!schemaPresent(store, present, error) || (!present && !createSchema(store, error))) return false;
     if (!declareBore(store, bore, error)) return false;
     if (declaration.external && !bind(store, bindingQuery(*declaration.external), bore.ref, error)) return false;
-    if (declaration.source && !bind(store, bindingQuery(*declaration.source), bore.ref, error)) return false;
+    if (declaration.source && !bind(store, bindingQuery(*declaration.source), bore.ref, error, verifiedLas)) return false;
     return transaction.commit(error);
 }
 bool listBores(const ProjectStore& store, long long wellId, const std::string& afterKey, int limit,

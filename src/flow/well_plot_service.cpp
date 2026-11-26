@@ -1,4 +1,5 @@
 #include "store/project_store.h"
+#include "store/wellbore_identity_store.h"
 #include <QJsonDocument>
 #include <set>
 
@@ -16,7 +17,7 @@ bool DataService::readProjectCoordinates(ProjectCoordinates& result, std::string
 bool DataService::listSourceWells(long long source, std::vector<long long>& result, std::string& error) const {
     result.clear(); error.clear(); QSqlQuery rows;
     if(source<=0){error="Invalid source ID";return false;}
-    if(!impl_->store.exec("SELECT well_id FROM log_sets WHERE source_id=? UNION SELECT well_id FROM tracks WHERE source_id=? UNION SELECT well_id FROM sample_tables WHERE source_id=? UNION SELECT well_id FROM well_objects WHERE source_id=? ORDER BY well_id",{source,source,source,source},error,&rows))return false;
+    if(!querySourceWellIds(impl_->store,source,rows,error))return false;
     while(rows.next())if(rows.value(0).toLongLong()>0)result.push_back(rows.value(0).toLongLong());
     return true;
 }
