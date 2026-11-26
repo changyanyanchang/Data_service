@@ -90,7 +90,7 @@ target_link_libraries(well_occurrence_tests PRIVATE paleo_data_service Qt6::Core
 add_test(NAME well_occurrence_contract COMMAND well_occurrence_tests)
 add_executable(sf3p_directory_tests tests/sf3p_directory_tests.cpp)
 target_include_directories(sf3p_directory_tests PRIVATE vendor/sbm/src)
-target_link_libraries(sf3p_directory_tests PRIVATE ${_pds_engine} Qt6::Core Qt6::Test)
+target_link_libraries(sf3p_directory_tests PRIVATE paleo_data_service ${_pds_engine} Qt6::Core Qt6::Test)
 add_test(NAME sf3p_directory_contract COMMAND sf3p_directory_tests)
 if(NOT PDS_SEISMIC_ENGINE_TARGET)
   add_executable(segyio_bounds_tests tests/segyio_bounds_tests.cpp)

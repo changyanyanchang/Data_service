@@ -1,5 +1,7 @@
 // 层：测试壳
 #include <QtTest>
+#include <QtEndian>
+#include "paleo_data/service.h"
 #include <QFile>
 #include <QFileInfo>
 #include <QTemporaryDir>
@@ -140,6 +142,58 @@ bool smallFixture(const QString& path, PagedWorkspaceInfo info, std::string& err
 class Sf3pDirectoryTests : public QObject {
     Q_OBJECT
 private slots:
+    void directoryImportSkipsOnlyConfirmedSiblingCaches() {
+        QTemporaryDir temp;
+        const QDir inputs(temp.filePath("inputs"));
+        QVERIFY(inputs.mkpath("."));
+        const auto raw = inputs.filePath("survey.sgy");
+        QByteArray trace(3600 + 240 + 4 * 16, char(0));
+        qToBigEndian<quint16>(2000, trace.data() + 3216);
+        qToBigEndian<quint16>(16, trace.data() + 3220);
+        qToBigEndian<quint16>(5, trace.data() + 3224);
+        qToBigEndian<quint16>(16, trace.data() + 3600 + 114);
+        qToBigEndian<quint16>(2000, trace.data() + 3600 + 116);
+        qToBigEndian<quint32>(100, trace.data() + 3600 + 188);
+        qToBigEndian<quint32>(200, trace.data() + 3600 + 192);
+        QFile original(raw);
+        QVERIFY(original.open(QIODevice::WriteOnly));
+        QCOMPARE(original.write(trace), trace.size());
+        original.close();
+        auto info = smallInfo();
+        info.sourcePath = raw.toUtf8().toStdString();
+        info.sourceSize = trace.size();
+        info.sourceMtimeTicks = std::filesystem::last_write_time(nativePath(raw)).time_since_epoch().count();
+        info.sourceFingerprint = PagedWorkspaceFingerprint(nativePath(raw), info.sourceSize);
+        std::string error;
+        const auto complete = raw + ".sf3p";
+        QVERIFY2(smallFixture(complete, info, error), error.c_str());
+        info.lodLevel = 1;
+        { PagedWorkspaceWriter writer;
+          QVERIFY2(writer.Open(nativePath(raw + ".l1.sf3p"), info, false, error), error.c_str()); }
+        QVERIFY(QFileInfo::exists(raw + ".l1.sf3p.partial"));
+
+        // Standalone, renamed, stale and invalid sidecars remain visible for review.
+        QVERIFY(QFile::copy(complete, inputs.filePath("standalone.sf3p")));
+        QVERIFY(QFile::copy(complete, raw + ".l3.sf3p"));
+        info.lodLevel = 2;
+        ++info.sourceFingerprint;
+        QVERIFY2(smallFixture(raw + ".l2.sf3p", info, error), error.c_str());
+        QFile invalid(raw + ".l4.sf3p");
+        QVERIFY(invalid.open(QIODevice::WriteOnly)); invalid.write("unrelated"); invalid.close();
+
+        paleo::data::DataService service;
+        QVERIFY2(service.createProject(temp.filePath("model").toUtf8().toStdString(), "cache discovery", error), error.c_str());
+        paleo::data::ImportOptions options; options.copySources = false;
+        paleo::data::ImportReport report;
+        QVERIFY2(service.importDirectory(inputs.path().toUtf8().toStdString(), options, report, error), error.c_str());
+        QCOMPARE(report.seen, 5);
+        const auto expectedBytes = trace.size() + QFileInfo(inputs.filePath("standalone.sf3p")).size()
+            + QFileInfo(raw + ".l3.sf3p").size() + QFileInfo(raw + ".l2.sf3p").size() + invalid.size();
+        QCOMPARE(report.hashedBytes, expectedBytes);
+        paleo::data::ImportReport explicitFile;
+        QVERIFY2(service.importFile(complete.toUtf8().toStdString(), options, explicitFile, error), error.c_str());
+        QCOMPARE(explicitFile.hashedBytes, QFileInfo(complete).size());
+    }
     void largeDirectoryStaysLazyAndBounded() {
         QTemporaryDir dir; const auto path = dir.filePath("large.sf3p"); const auto info = largeInfo();
         QCOMPARE(info.PageCount(), quint64(50720768));
