@@ -1,5 +1,6 @@
 #include "store/project_store.h"
 #include "file_digest.h"
+#include "Engine/PagedWorkspace.h"
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
@@ -13,6 +14,8 @@
 #include <QThreadPool>
 #include <QRunnable>
 #include <QHash>
+#include <QRegularExpression>
+#include <QtEndian>
 #include <atomic>
 #include <deque>
 #include <future>
@@ -20,6 +23,45 @@
 namespace paleo::data {
 using namespace detail;
 namespace {
+// Directory discovery treats an engine-generated sidecar as part of its SEG-Y.
+// Explicit file import and standalone/mismatched workspaces keep their normal source identity.
+bool isSiblingPagedCache(const QFileInfo& candidate) {
+    const QString name = candidate.fileName();
+    if (!name.endsWith(".sf3p", Qt::CaseInsensitive) && !name.endsWith(".sf3p.partial", Qt::CaseInsensitive))
+        return false;
+    static const QRegularExpression pattern(
+        QStringLiteral(R"(^(.+\.(?:sgy|segy))(?:\.l([1-9]\d*))?\.sf3p(\.partial)?$)"),
+        QRegularExpression::CaseInsensitiveOption);
+    const auto match = pattern.match(name);
+    if (!match.hasMatch() || candidate.isSymLink()) return false;
+    bool validLevel = true;
+    const uint level = match.captured(2).isEmpty() ? 0 : match.captured(2).toUInt(&validLevel);
+    if (!validLevel) return false;
+    const QFileInfo source(candidate.dir(), match.captured(1));
+    if (!source.isFile() || !source.isReadable()) return false;
+
+    QFile file(candidate.filePath());
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    const auto prefix = file.read(16);
+    if (prefix.size() != 16 || prefix.left(8) != "SF3PWG01") return false;
+    const auto version = qFromLittleEndian<quint32>(prefix.constData() + 8);
+    if (version != 6 && (version != 7 || qFromLittleEndian<quint32>(prefix.constData() + 12) > 1024 * 1024))
+        return false;
+    file.close();
+
+    seismic::engine::PagedWorkspaceReader reader;
+    std::string error;
+    if (!reader.Open(candidate.filesystemFilePath(), error, true)) return false;
+    const auto& info = reader.Info();
+    if ((!info.complete && match.captured(3).isEmpty()) || info.lodLevel != level ||
+        info.sourceSize != quint64(source.size()) || source != QFileInfo(QString::fromUtf8(info.sourcePath))) return false;
+    std::error_code ec;
+    const auto path = source.filesystemFilePath();
+    const auto ticks = std::filesystem::last_write_time(path, ec).time_since_epoch().count();
+    return !ec && info.sourceMtimeTicks == ticks &&
+        info.sourceFingerprint == seismic::engine::PagedWorkspaceFingerprint(path, info.sourceSize);
+}
+
 struct MeasureTime {
     long long& total; QElapsedTimer timer;
     explicit MeasureTime(long long& target):total(target){timer.start();}
@@ -294,7 +336,7 @@ bool DataService::importDirectory(const std::string& directory,const ImportOptio
             if(cancelled&&cancelled()){report.cancelled=true;break;}
             auto path=QDir::fromNativeSeparators(it.next());const auto info=it.fileInfo();
             if(info.isDir()){if(!info.isSymLink())pending<<path;}
-            else if(info.isFile())files<<path;
+            else if(info.isFile() && !isSiblingPagedCache(info))files<<path;
             if(++enumerated%100==0&&progress)progress({0,0,s(path),"扫描目录"});
         }
         if(report.cancelled)break;
